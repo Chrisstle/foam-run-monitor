@@ -1,0 +1,560 @@
+#!/bin/bash
+
+# Usage: runCase [-n|--new] [-c|--continue] [-r|--reconstruct]
+
+# -----------------------------------------------------------------------------
+# 1. Setup and Solver Detection
+# -----------------------------------------------------------------------------
+clear
+
+mode=""
+customNP=""
+while [[ "$#" -gt 0 ]]
+do
+    case $1 in
+        -n|--new) mode="new" ;;
+        -c|--continue) mode="continue" ;;
+        -r|--reconstruct) mode="reconstruct" ;;
+        -clean) mode="clean" ;;
+        -np) 
+            if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]
+            then
+                echo "[ERROR] -np requires a positive integer argument."
+                exit 1
+            fi
+            customNP="$2"
+            shift
+            ;;
+        *) echo "[ERROR] Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ -z "$mode" ]]
+then
+    echo "Usage: runCase [-n|--new] OR [-c|--continue] OR [-r|--reconstruct] OR [-clean] [-np ##]"
+    exit 1
+fi
+
+if [[ "$mode" == "clean" ]]
+then
+    mkdir -p log
+    echo ""
+    printf "[CLEAN] %-40s\n" "Cleaning case directory"
+    find log/ -type f ! -name 'log.checkMesh' -delete
+    foamListTimes -rm
+    rm -rf processor*
+    if [[ -d "0.orig" ]]; then rm -rf 0; cp -r 0.orig 0; fi
+    setFields > log/log.setFields 2>&1
+    echo ""
+    echo "[DONE]  Cleaning complete."
+    exit 0
+fi
+
+# Detect OpenFOAM Environment
+ofVersion="${WM_PROJECT_VERSION:-Unknown}"
+
+solver=$(grep "^[[:space:]]*application" system/controlDict | awk '{print $2}' | sed 's/;//')
+if ! command -v "$solver" &> /dev/null
+then
+    echo "[ERROR] Solver '${solver}' not found in PATH."
+    exit 1
+fi
+
+# Update decomposeParDict if customNP is set
+if [[ -n "$customNP" ]]
+then
+    if [[ -f "system/decomposeParDict" ]]
+    then
+        sed -i -E "s/^([[:space:]]*numberOfSubdomains[[:space:]]+)[0-9]+(;)/\1${customNP}\2/" system/decomposeParDict
+    else
+        echo "[ERROR] system/decomposeParDict not found, cannot change number of processors."
+        exit 1
+    fi
+fi
+
+# Detect Parallel Configuration
+runParallel=false
+nProcs=1
+
+if [[ -f "system/decomposeParDict" ]]
+then
+    parsedProcs=$(grep "^[[:space:]]*numberOfSubdomains" system/decomposeParDict | awk '{print $2}' | sed 's/;//')
+    if [[ "$parsedProcs" =~ ^[0-9]+$ ]] && [[ "$parsedProcs" -gt 0 ]]
+    then
+        nProcs="$parsedProcs"
+        if [[ "$nProcs" -gt 1 ]]
+        then
+            runParallel=true
+        fi
+    else
+        echo "[ERROR] Could not read a valid 'numberOfSubdomains' from decomposeParDict."
+        exit 1
+    fi
+fi
+
+# Detect Dynamic Mesh Configuration
+isDynamicMesh=false
+meshTypeStr="Static"
+if [[ -f "constant/dynamicMeshDict" ]]
+then
+    meshType=$(grep "^[[:space:]]*dynamicFvMesh" constant/dynamicMeshDict | awk '{print $2}' | sed 's/;//')
+    if [[ -n "$meshType" ]] && [[ "$meshType" != "staticFvMesh" ]]
+    then
+        isDynamicMesh=true
+        meshTypeStr="Dynamic (AMR)"
+    fi
+fi
+
+endTime=$(grep "^[[:space:]]*endTime" system/controlDict | awk '{print $2}' | sed 's/;//')
+writeInterval=$(grep "^[[:space:]]*writeInterval" system/controlDict | head -1 | awk '{print $2}' | sed 's/;//')
+
+# --- Start Time Detection ---
+simStartT="0"
+if [[ "$mode" == "continue" ]] || [[ "$mode" == "reconstruct" ]]
+then
+    simStartT=$( {
+        foamListTimes -latestTime
+        foamListTimes -processor -latestTime
+    } 2>/dev/null | grep -ve '^$' | sort -V | tail -n 1 )
+
+    if [[ -z "$simStartT" ]]; then simStartT="0"; fi
+fi
+
+# --- Mesh Status and Cell Count ---
+mkdir -p log
+if [[ ! -f log/log.checkMesh ]]
+then
+    printf "[INIT]  %-25s : Checking Mesh" "Mesh Check"
+    checkMesh -constant > log/log.checkMesh 2>&1 &
+    check_pid=$!
+    
+    # Trap SIGINT/SIGTERM to kill background checkMesh
+    trap 'kill -TERM "$check_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+    
+    dots="."
+    while kill -0 "$check_pid" 2>/dev/null
+    do
+        sleep 1
+        printf "\r\033[2K[INIT]  %-25s : Checking Mesh%s" "Mesh Check" "$dots"
+        case "$dots" in
+            "")    dots="." ;;
+            ".")   dots=".." ;;
+            "..")  dots="..." ;;
+            "...") dots="" ;;
+        esac
+    done
+    
+    wait "$check_pid"
+    
+    # Restore traps
+    trap - SIGINT SIGTERM
+    
+    if grep -iq "Mesh OK" log/log.checkMesh
+    then
+        meshStatus="OK"
+    else
+        meshStatus="Failed"
+    fi
+    echo -en "\r\033[2K"
+else
+    meshStatus=$(grep -iq "Mesh OK" log/log.checkMesh && echo "OK" || echo "Failed")
+fi
+
+cellCountRaw=$(grep "cells:" log/log.checkMesh | awk '{print $2}')
+if [[ -z "$cellCountRaw" ]]; then cellCountRaw="0"; fi
+cellCount=$(echo "$cellCountRaw" | sed ':a;s/\B[0-9]\{3\}\>/ &/g;ta')
+
+if [[ "$runParallel" == true ]]
+then
+    if [[ "$cellCountRaw" =~ ^[0-9]+$ ]] && [[ "$nProcs" =~ ^[0-9]+$ ]] && [[ "$nProcs" -gt 0 ]]
+    then
+        cellsPerProcRaw=$(( cellCountRaw / nProcs ))
+    else
+        cellsPerProcRaw="0"
+    fi
+    cellsPerProc=$(echo "$cellsPerProcRaw" | sed ':a;s/\B[0-9]\{3\}\>/ &/g;ta')
+fi
+
+# --- Aligned Setup Info ---
+printf "[INFO]  %-25s : %s\n" "Case Folder" "$(basename "$(pwd)")"
+printf "[INFO]  %-25s : %s\n" "OpenFOAM Version" "$ofVersion"
+printf "[INFO]  %-25s : %s\n" "Solver" "$solver"
+if [[ "$runParallel" == true ]]
+then
+    printf "[INFO]  %-25s : Parallel (%s cores)\n" "Execution" "$nProcs"
+else
+    printf "[INFO]  %-25s : Serial (1 core)\n" "Execution"
+fi
+printf "[INFO]  %-25s : %s s\n" "Target endTime" "$endTime"
+printf "[INFO]  %-25s : %s s\n" "Write Interval" "$writeInterval"
+printf "[INFO]  %-25s : %s\n" "Mesh Type" "$meshTypeStr"
+printf "[INFO]  %-25s : %s\n" "Mesh Status" "$meshStatus"
+printf "[INFO]  %-25s : %s\n" "Initial Cell Count" "$cellCount"
+if [[ "$runParallel" == true ]]
+then
+    printf "[INFO]  %-25s : %s\n" "Initial Cells per Core" "$cellsPerProc"
+fi
+echo ""
+printf "[INFO]  %-25s : %s s\n" "Starting from" "$simStartT"
+
+# -----------------------------------------------------------------------------
+# 2. Mode Specific Logic
+# -----------------------------------------------------------------------------
+
+if [[ "$mode" == "reconstruct" ]]
+then
+    echo ""
+    echo "[INIT]  Starting manual reconstruction"
+    echo ""
+    
+    if [[ "$runParallel" == false ]]
+    then
+        echo "[INFO]  Case configured for serial execution. No reconstruction required."
+        exit 0
+    fi
+else
+    hasData=0
+    if ls -d processor* >/dev/null 2>&1; then hasData=1; fi
+    if find . -maxdepth 1 -type d -name "[0-9]*" | grep -vE '/0$' | grep -qE '/[0-9]+(\.[0-9]+)?$'; then 
+        hasData=1
+    fi
+
+    if [[ "$mode" == "new" ]]
+    then
+        if [[ "$hasData" -eq 1 ]]
+        then
+            echo ""
+            printf "[WARN]  %-25s\n" "Existing simulation data detected."
+            read -r -p "        Delete and restart simulation? [y/N]: " reply
+            if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]
+            then
+                echo "[ABORT] Simulation cancelled."
+                exit 1
+            fi
+        fi
+        
+        echo ""
+        printf "[CLEAN] %-40s\n" "Cleaning case directory"
+        find log/ -type f ! -name 'log.checkMesh' -delete
+        foamListTimes -rm
+        rm -rf processor*
+        if [[ -d "0.orig" ]]; then rm -rf 0; cp -r 0.orig 0; fi
+        setFields > log/log.setFields 2>&1
+        echo ""
+    fi
+
+    # -----------------------------------------------------------------------------
+    # 3. Execution and Monitoring
+    # -----------------------------------------------------------------------------
+
+    if [[ "$runParallel" == true ]]
+    then
+        if ! ls -d processor* >/dev/null 2>&1
+        then
+            printf "[RUN]   Decomposing domain"
+            decomposePar > log/log.decomposePar 2>&1 &
+            decomp_pid=$!
+            
+            # Trap SIGINT/SIGTERM to kill background decomposePar
+            trap 'kill -TERM "$decomp_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+            
+            dots="."
+            while kill -0 "$decomp_pid" 2>/dev/null
+            do
+                sleep 1
+                printf "\r\033[2K[RUN]   Decomposing domain%s" "$dots"
+                case "$dots" in
+                    "")    dots="." ;;
+                    ".")   dots=".." ;;
+                    "..")  dots="..." ;;
+                    "...") dots="" ;;
+                esac
+            done
+            
+            wait "$decomp_pid"
+            
+            # Restore traps
+            trap - SIGINT SIGTERM
+            
+            printf "\r\033[2K[RUN]   Decomposing domain... Done\n"
+        fi
+
+        printf "[RUN]   Starting %s in parallel (%s cores)\n" "$solver" "$nProcs"
+        mpirun -np "$nProcs" "$solver" -parallel > log/log.run 2>&1 &
+        solver_pid=$!
+    else
+        printf "[RUN]   Starting %s in serial\n" "$solver"
+        "$solver" > log/log.run 2>&1 &
+        solver_pid=$!
+    fi
+
+    # Intercept Ctrl+C and kill the background solver process
+    trap 'echo -e "\n[ABORT] User interrupt. Terminating solver..."; kill -TERM "$solver_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+
+    echo -e "\n\n\n\n\n\n\n\n\n\n\n\n"
+
+    while kill -0 "$solver_pid" 2>/dev/null
+    do
+        sleep 5
+        
+        # Check latest saved time step depending on execution mode
+        if [[ "$runParallel" == true ]]
+        then
+            latestSaved=$(foamListTimes -processor -latestTime 2>/dev/null)
+        else
+            latestSaved=$(foamListTimes -latestTime 2>/dev/null)
+        fi
+        if [[ -z "$latestSaved" ]]; then latestSaved="0"; fi
+
+        if [[ "$isDynamicMesh" == true ]]
+        then
+            latestCells=$(grep -iE "^[[:space:]]*(number of cells|cells:)" log/log.run 2>/dev/null | tail -n 1 | tr -dc '0-9')
+            if [[ -n "$latestCells" ]]; then
+                currentCellCountRaw="$latestCells"
+            else
+                currentCellCountRaw="$cellCountRaw"
+            fi
+        else
+            currentCellCountRaw="$cellCountRaw"
+        fi
+        currentCellCount=$(echo "$currentCellCountRaw" | sed ':a;s/\B[0-9]\{3\}\>/ &/g;ta')
+        
+        if [[ "$runParallel" == true ]]
+        then
+            if [[ "$currentCellCountRaw" =~ ^[0-9]+$ ]] && [[ "$nProcs" =~ ^[0-9]+$ ]] && [[ "$nProcs" -gt 0 ]]
+            then
+                currentCellsPerProcRaw=$(( currentCellCountRaw / nProcs ))
+            else
+                currentCellsPerProcRaw="0"
+            fi
+            currentCellsPerProc=$(echo "$currentCellsPerProcRaw" | sed ':a;s/\B[0-9]\{3\}\>/ &/g;ta')
+        else
+            currentCellsPerProc="N/A"
+        fi
+
+        output=$(tail -n 2000 log/log.run 2>/dev/null | awk -v end_time="$endTime" -v last_saved="$latestSaved" \
+        -v curr_cells="$currentCellCount" -v curr_cpp="$currentCellsPerProc" \
+        -v is_dynamic="$isDynamicMesh" -v is_parallel="$runParallel" '
+        function fmt(val) {
+            if (val == "N/A" || val == "") return "N/A";
+            v = val + 0;
+            abs_v = (v < 0) ? -v : v;
+            if (abs_v >= 0.01 || abs_v == 0) {
+                return sprintf("%.3f", v);
+            } else {
+                return sprintf("%.2e", v);
+            }
+        }
+        
+        BEGIN { tc=0; dtc=0; ec=0; c_mean="N/A"; c_max="N/A"; ic_mean="N/A"; ic_max="N/A"; cap_num=""; }
+        
+        /^Time = / { t[tc++] = $3 }
+        /^deltaT = / { dt[dtc++] = $3 }
+        /^ExecutionTime = / { exec[ec++] = $3 }
+        
+        /Courant Number/ && !/Interface/ {
+            for(i=1; i<NF; i++) {
+                if($i == "mean:") c_mean = $(i+1)
+                if($i == "max:")  c_max  = $(i+1)
+            }
+        }
+        /Interface Courant Number/ {
+            for(i=1; i<NF; i++) {
+                if($i == "mean:") ic_mean = $(i+1)
+                if($i == "max:")  ic_max  = $(i+1)
+            }
+        }
+        /Capillary Number/ {
+            for(i=1; i<=NF; i++) {
+                if($i ~ /Number:?/) {
+                    if (i < NF) {
+                        cap_num = $(i+1)
+                    } else {
+                        split($i, parts, ":")
+                        cap_num = parts[2]
+                    }
+                    break
+                }
+            }
+        }
+
+        END {
+            if (tc == 0 || ec == 0) {
+                print "WAITING"
+                exit
+            }
+            
+            curr_t = t[tc-1]; curr_dt = dt[dtc-1]; curr_exec = exec[ec-1]
+            idx = (tc > 11) ? tc - 11 : 0
+            steps = tc - 1 - idx
+            speed = (curr_exec > exec[idx]) ? (curr_t - t[idx]) / (curr_exec - exec[idx]) : 0
+            iter_speed = (steps > 0) ? (curr_exec - exec[idx]) / steps : 0
+            
+            prog = (curr_t / end_time) * 100
+            if (prog > 100) prog = 100; if (prog < 0) prog = 0
+            eta_sec = (speed > 0 && end_time > curr_t) ? (end_time - curr_t) / speed : 0
+
+            bar_len = 40; filled = int((prog / 100) * bar_len)
+            bar = "["
+            for(i=0; i<bar_len; i++) {
+                if(i < filled) bar = bar "#"
+                else if(i == filled) bar = bar ">"
+                else bar = bar "-"
+            }
+            bar = bar "]"
+
+            eh = int(curr_exec/3600); em = int((curr_exec%3600)/60); es = int(curr_exec%60)
+            th = int(eta_sec/3600); tm = int((eta_sec%3600)/60); ts = int(eta_sec%60)
+
+            printf "Progress                 : %s %.1f%%\n", bar, prog
+            printf "Time (t)                 : %s s\n", fmt(curr_t)
+            printf "Timestep (dt)            : %s s\n", fmt(curr_dt)
+            printf "Latest Saved Timestep    : %s s\n", last_saved
+            if (is_dynamic == "true") {
+                printf "Cell Count               : %s\n", curr_cells
+                if (is_parallel == "true") {
+                    printf "Cells per Core           : %s\n", curr_cpp
+                }
+            }
+            printf "Courant Number           : mean: %s max: %s\n", fmt(c_mean), fmt(c_max)
+            printf "Interface Courant Number : mean: %s max: %s\n", fmt(ic_mean), fmt(ic_max)
+            if (cap_num != "") {
+                printf "Capillary Number         : %s\n", fmt(cap_num)
+            }
+            printf "Iteration Speed          : %.2f s/it\n", iter_speed
+            if (speed > 0 && tc > 10) 
+                printf "Elapsed                  : %02d:%02d:%02d | ETA: %02d:%02d:%02d\n", eh, em, es, th, tm, ts
+            else 
+                printf "Elapsed                  : %02d:%02d:%02d | ETA: Calculating...\n", eh, em, es
+        }')
+
+        if [[ "$output" != "WAITING" ]] && [[ -n "$output" ]]
+        then
+            temp="${output//[^$'\n']/}"
+            num_lines=$(( ${#temp} + 1 ))
+            echo -en "\033[${num_lines}A"
+            while IFS= read -r line; do echo -e "\033[2K$line"; done <<< "$output"
+        fi
+    done
+
+    wait "$solver_pid"
+    exit_status=$?
+
+    if [ $exit_status -ne 0 ]
+    then
+        echo ""
+        printf "[ERROR] Solver terminated unexpectedly (Exit code: %s)\n" "$exit_status"
+        echo "------------------- LAST LOG ENTRIES -------------------"
+        tail -n 25 log/log.run
+        echo "--------------------------------------------------------"
+        exit $exit_status
+    fi
+    echo ""
+fi
+
+# -----------------------------------------------------------------------------
+# 4. Post-Processing
+# -----------------------------------------------------------------------------
+if [[ "$runParallel" == true ]]
+then
+    reconstructSuccess=true
+
+    if [[ "$isDynamicMesh" == true ]]
+    then
+        printf "[RUN]   %-40s\n" "Reconstructing dynamic mesh"
+        if ! reconstructParMesh >> log/log.reconstructParMesh 2>&1
+        then
+            reconstructSuccess=false
+            echo ""
+            printf "[ERROR] reconstructParMesh failed. Processor directories preserved.\n"
+            printf "        Please check log/log.reconstructParMesh for details.\n"
+        fi
+    fi
+
+    if [[ "$reconstructSuccess" == true ]]
+    then
+        printf "[RUN]   %-40s\n" "Reconstructing results"
+        
+        # Get all reconstructed times
+        reconstructTimes=$(foamListTimes -processor 2>/dev/null | grep -ve '^$' | sort -V)
+        totalTimesCount=$(echo "$reconstructTimes" | grep -ve '^$' | wc -l)
+        
+        # Start reconstructPar in the background
+        reconstructPar > log/log.reconstructPar 2>&1 &
+        reconstruct_pid=$!
+        
+        # Trap SIGINT and SIGTERM to kill reconstructPar if interrupted
+        trap 'echo -e "\n[ABORT] User interrupt. Terminating reconstructPar..."; kill -TERM "$reconstruct_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+        
+        echo -e "\n"
+        
+        while kill -0 "$reconstruct_pid" 2>/dev/null
+        do
+            sleep 1
+            reconstructedTimesList=$(grep "^Time = " log/log.reconstructPar | awk '{print $3}')
+            reconstructedCount=$(echo "$reconstructedTimesList" | grep -ve '^$' | wc -l)
+            lastReconstructedTime=$(echo "$reconstructedTimesList" | tail -n 1)
+            
+            if [[ -z "$lastReconstructedTime" ]]; then lastReconstructedTime="N/A"; fi
+            
+            output=$(awk -v total="$totalTimesCount" -v current="$reconstructedCount" -v lastTime="$lastReconstructedTime" '
+            BEGIN {
+                prog = 0
+                if (total > 0) {
+                    prog = (current / total) * 100
+                }
+                if (prog > 100) prog = 100
+                if (prog < 0) prog = 0
+                
+                bar_len = 40
+                filled = int((prog / 100) * bar_len)
+                bar = "["
+                for(i=0; i<bar_len; i++) {
+                    if(i < filled) bar = bar "#"
+                    else if(i == filled) bar = bar ">"
+                    else bar = bar "-"
+                }
+                bar = bar "]"
+                
+                printf "Progress                 : %s %.1f%%\n", bar, prog
+                printf "Reconstructing Timestep  : %s s\n", lastTime
+            }')
+            
+            if [[ -n "$output" ]]
+            then
+                echo -en "\033[2A"
+                while IFS= read -r line; do echo -e "\033[2K$line"; done <<< "$output"
+            fi
+        done
+        
+        wait "$reconstruct_pid"
+        reconstruct_exit_status=$?
+        
+        # Reset trap
+        trap - SIGINT SIGTERM
+        
+        if [ $reconstruct_exit_status -eq 0 ]
+        then
+            # Clear progress bar and Reconstructing Timestep lines
+            echo -en "\033[2A\033[2K\033[1B\033[2K\033[1A"
+            
+            printf "[CLEAN] %-40s\n" "Removing processor directories"
+            rm -rf processor*
+        else
+            echo ""
+            printf "[ERROR] reconstructPar failed. Processor directories preserved.\n"
+            printf "        Please check log/log.reconstructPar for details.\n"
+            exit 1
+        fi
+    else
+        exit 1
+    fi
+fi
+
+echo "[DONE]  Simulation complete in $(pwd)"
+
+# Horizontal Divider
+cols=$(tput cols)
+if [[ "$cols" -gt 100 ]]; then cols=100; fi
+printf '%*s\n' "$cols" '' | tr ' ' '='
