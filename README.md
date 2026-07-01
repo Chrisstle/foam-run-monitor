@@ -23,6 +23,7 @@
 ```bash
 runCase [MODE] [OPTIONS]
 ```
+Run it from your case directory (the directory where you find system, constant, 0 etc.)
 
 ### Modes (Required)
 
