@@ -6,7 +6,7 @@ A collection of robust utility scripts designed to streamline the execution and 
 
 ## 1. runCase
 
-`runCase` is a robust bash script designed to streamline the execution and monitoring of OpenFOAM simulations. It automatically handles solver detection, parallel decomposition, dynamic mesh tracking, and data reconstruction, wrapping it all in a clean, live-updating progress interface.
+`runCase` is a robust bash script designed to streamline the execution and monitoring of OpenFOAM® simulations. It automatically handles solver detection, parallel decomposition, dynamic mesh tracking, and data reconstruction, wrapping it all in a clean, live-updating progress interface.
 
 ### Features
 - **Smart Initialization**: Automatically reads `controlDict`, `decomposeParDict`, and `dynamicMeshDict` to determine the solver, execution mode (serial/parallel), target end time, and mesh type.
@@ -74,3 +74,8 @@ foamProgress [OPTIONS]
 If `dynamicFvMesh` (e.g., Adaptive Mesh Refinement) is detected in `constant/dynamicMeshDict`:
 1. `foamProgress` and `runCase` will dynamically display current cell counts by parsing the solver output.
 2. During reconstruction, `runCase` automatically executes `reconstructParMesh` before `reconstructPar`.
+
+
+
+<sub>*OPENFOAM® is a registered trade mark of OpenCFD Limited, producer and distributor of the OpenFOAM software via www.openfoam.com. This offering is not approved or endorsed by OpenCFD Limited.*</sub>
+
