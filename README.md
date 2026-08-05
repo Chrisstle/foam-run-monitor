@@ -39,10 +39,10 @@ You must specify exactly one of the following modes to run the script:
 
 ## 2. foamProgress
 
-`foamProgress` is a Python-based utility that monitors one or multiple active OpenFOAM simulations simultaneously from anywhere in your filesystem. 
+`foamProgress` is a Python-based utility that monitors one or multiple active OpenFOAM® simulations simultaneously from anywhere in your filesystem. 
 
 ### Features
-- **Global Monitoring**: Automatically detects all running OpenFOAM processes on your machine.
+- **Global Monitoring**: Automatically detects all running OpenFOAM® processes on your machine.
 - **TUI Dashboard**: Features a native Terminal User Interface (TUI) allowing you to seamlessly scroll through multiple active cases.
 - **Agnostic Log Parsing**: Traces OS-level file descriptors to find log files, making it completely immune to varying log names, locations, or standard output redirections (e.g. `tee` or `mpirun` wrappers).
 - **Dynamic Caching**: Actively caches metrics like iteration speed and Courant numbers to ensure the UI stays solid when polling between sequential solver output updates.
@@ -63,7 +63,7 @@ foamProgress [OPTIONS]
 ## Under the Hood
 
 ### Logs
-`runCase` quietly redirects all standard OpenFOAM outputs into a generated `log/` directory. You can inspect these if something goes wrong:
+`runCase` quietly redirects all standard OpenFOAM® outputs into a generated `log/` directory. You can inspect these if something goes wrong:
 - `log/log.checkMesh`
 - `log/log.decomposePar`
 - `log/log.run` (The main solver output)
