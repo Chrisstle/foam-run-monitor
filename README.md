@@ -6,7 +6,7 @@ A collection of robust utility scripts designed to streamline the execution and 
 
 ## 1. runCase
 
-`runCase` is a robust bash script designed to streamline the execution and monitoring of OpenFOAM simulations. It automatically handles environment detection, parallel decomposition, dynamic mesh tracking, and data reconstruction, wrapping it all in a clean, live-updating progress interface.
+`runCase` is a robust bash script designed to streamline the execution and monitoring of OpenFOAM simulations. It automatically handles solver detection, parallel decomposition, dynamic mesh tracking, and data reconstruction, wrapping it all in a clean, live-updating progress interface.
 
 ### Features
 - **Smart Initialization**: Automatically reads `controlDict`, `decomposeParDict`, and `dynamicMeshDict` to determine the solver, execution mode (serial/parallel), target end time, and mesh type.
