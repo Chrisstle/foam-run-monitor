@@ -45,7 +45,7 @@ You must specify exactly one of the following modes to run the script:
 - **Global Monitoring**: Automatically detects all running OpenFOAM processes on your machine.
 - **TUI Dashboard**: Features a native Terminal User Interface (TUI) allowing you to seamlessly scroll through multiple active cases.
 - **Agnostic Log Parsing**: Traces OS-level file descriptors to find log files, making it completely immune to varying log names, locations, or standard output redirections (e.g. `tee` or `mpirun` wrappers).
-- **Dynamic Caching**: Actively caches metrics like iteration speed and Courant numbers to ensure the UI stays solid and never flickers when polling between sequential solver output updates.
+- **Dynamic Caching**: Actively caches metrics like iteration speed and Courant numbers to ensure the UI stays solid when polling between sequential solver output updates.
 
 ### Usage
 ```bash
