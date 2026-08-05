@@ -1,0 +1,569 @@
+#!/usr/bin/env python3
+import os
+import re
+import sys
+import time
+import argparse
+
+last_known_metrics = {}
+
+def get_foam_application(cwd):
+    control_dict_path = os.path.join(cwd, 'system', 'controlDict')
+    try:
+        with open(control_dict_path, 'r') as f:
+            content = f.read()
+            match = re.search(r'(?m)^\s*application\s+([\w_]+)\s*;', content)
+            if match:
+                return match.group(1)
+    except:
+        pass
+    return None
+
+def get_control_dict_value(cwd, key):
+    control_dict_path = os.path.join(cwd, 'system', 'controlDict')
+    try:
+        with open(control_dict_path, 'r') as f:
+            content = f.read()
+            content = re.sub(r'//.*', '', content)
+            content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+            match = re.search(r'(?m)^\s*' + key + r'\s+([^\s;]+)\s*;', content)
+            if match:
+                return match.group(1)
+    except:
+        pass
+    return None
+
+def get_write_interval(cwd):
+    return get_control_dict_value(cwd, 'writeInterval')
+
+def get_mesh_type(cwd):
+    dict_path = os.path.join(cwd, 'constant', 'dynamicMeshDict')
+    try:
+        if os.path.isfile(dict_path):
+            with open(dict_path, 'r') as f:
+                content = f.read()
+                content = re.sub(r'//.*', '', content)
+                content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+                match = re.search(r'(?m)^\s*dynamicFvMesh\s+([^\s;]+)\s*;', content)
+                if match and match.group(1) != 'staticFvMesh':
+                    return "Dynamic (AMR)"
+    except:
+        pass
+    return "Static"
+
+def get_mesh_info(cwd):
+    log_path = os.path.join(cwd, 'log', 'log.checkMesh')
+    status = "Unknown"
+    cells = "Unknown"
+    try:
+        if os.path.isfile(log_path):
+            with open(log_path, 'r') as f:
+                content = f.read()
+                if "Mesh OK" in content:
+                    status = "OK"
+                elif "Failed" in content:
+                    status = "Failed"
+                
+                match = re.search(r'cells:\s+(\d+)', content)
+                if match:
+                    cells = int(match.group(1))
+                    cells = f"{cells:,}".replace(",", " ")
+    except:
+        pass
+    return status, cells
+
+def get_current_time_from_dirs(cwd):
+    times = []
+    try:
+        search_dir = cwd
+        if os.path.isdir(os.path.join(cwd, 'processor0')):
+            search_dir = os.path.join(cwd, 'processor0')
+            
+        for d in os.listdir(search_dir):
+            if d in ['constant', 'system'] or not os.path.isdir(os.path.join(search_dir, d)):
+                continue
+            try:
+                times.append(float(d))
+            except ValueError:
+                pass
+    except:
+        pass
+    if times:
+        return max(times)
+    return None
+
+def get_active_log_file(pid, cwd):
+    # 1. Walk up the process tree to find any file descriptor pointing to a valid log
+    current_pid = str(pid)
+    visited = set()
+    while current_pid and current_pid != '1' and current_pid not in visited:
+        visited.add(current_pid)
+        try:
+            fd_dir = f'/proc/{current_pid}/fd'
+            if os.path.isdir(fd_dir):
+                for fd in os.listdir(fd_dir):
+                    try:
+                        target = os.readlink(os.path.join(fd_dir, fd))
+                        # Must be a real file, not a pipe, socket, or terminal
+                        if target.startswith('/') and not target.startswith('/dev/') and os.path.isfile(target):
+                            with open(target, 'rb') as f:
+                                f.seek(max(0, os.path.getsize(target) - 8192))
+                                if b'Time =' in f.read():
+                                    return target
+                    except:
+                        pass
+        except:
+            pass
+            
+        try:
+            with open(f'/proc/{current_pid}/stat', 'r') as f:
+                stat = f.read()
+                # Parse ppid (4th field) reliably despite spaces in comm (2nd field)
+                ppid = stat[stat.rfind(')') + 1:].split()[1]
+                current_pid = ppid
+        except:
+            break
+
+    # 2. If process tree search fails (e.g. they piped to `tee`), search recursively in cwd
+    # We only look at files modified in the last 1 hour, sorted by newest first
+    try:
+        candidates = []
+        now = time.time()
+        for root, dirs, files in os.walk(cwd):
+            # Skip massive data directories to keep scanning instantaneous
+            dirs[:] = [d for d in dirs if not d.startswith('processor') and d not in ['constant', 'system']]
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    mtime = os.path.getmtime(fp)
+                    if now - mtime < 3600: # Modified in the last hour
+                        candidates.append((fp, mtime))
+                except:
+                    pass
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        for fp, _ in candidates:
+            try:
+                with open(fp, 'rb') as f_obj:
+                    f_obj.seek(max(0, os.path.getsize(fp) - 8192))
+                    if b'Time =' in f_obj.read():
+                        return fp
+            except:
+                pass
+    except:
+        pass
+
+    return None
+
+def get_current_time(pid, cwd, log_file):
+    if log_file:
+        try:
+            with os.popen(f"tail -n 1000 {log_file} | grep '^Time = ' | tail -n 1") as f:
+                content = f.read()
+                if content:
+                    return float(content.split()[2])
+        except:
+            pass
+    return get_current_time_from_dirs(cwd)
+
+def get_log_metrics(log_file):
+    metrics = {
+        't': [], 'dt': None, 'exec': [], 'c_mean': 'N/A', 'c_max': 'N/A', 
+        'ic_mean': 'N/A', 'ic_max': 'N/A', 'cap_num': None, 'cells': None
+    }
+    if not log_file:
+        return metrics
+    try:
+        # Use tail to efficiently grab the end of the file rather than searching from the beginning
+        with os.popen(f"tail -n 1000 {log_file}") as f:
+            for line in f:
+                if line.startswith('Time = '):
+                    metrics['t'].append(float(line.split()[2]))
+                elif line.startswith('ExecutionTime = '):
+                    metrics['exec'].append(float(line.split()[2]))
+                elif line.startswith('deltaT = '):
+                    metrics['dt'] = float(line.split()[2])
+                elif 'Courant Number' in line and 'Interface' not in line:
+                    parts = line.split()
+                    if 'mean:' in parts and 'max:' in parts:
+                        metrics['c_mean'] = parts[parts.index('mean:')+1]
+                        metrics['c_max'] = parts[parts.index('max:')+1]
+                elif 'Interface Courant Number' in line:
+                    parts = line.split()
+                    if 'mean:' in parts and 'max:' in parts:
+                        metrics['ic_mean'] = parts[parts.index('mean:')+1]
+                        metrics['ic_max'] = parts[parts.index('max:')+1]
+                elif 'Capillary Number' in line:
+                    parts = line.replace(':', ' ').split()
+                    if len(parts) >= 3:
+                        metrics['cap_num'] = parts[-1]
+                elif re.match(r'^\s*(number of cells|cells:)', line, re.I):
+                    metrics['cells'] = ''.join(filter(str.isdigit, line))
+    except:
+        pass
+    return metrics
+
+def get_elapsed_time(pid):
+    try:
+        with os.popen(f"ps -p {pid} -o etimes=") as f:
+            output = f.read().strip()
+            if output.isdigit():
+                return int(output)
+    except:
+        pass
+    return None
+
+def format_time(seconds):
+    if seconds is None:
+        return ""
+    try:
+        seconds = int(float(seconds))
+    except:
+        return ""
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    if d > 0:
+        return f"{d}d {h}h {m}m"
+    elif h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    elif m > 0:
+        return f"00:{m:02d}:{s:02d}"
+    return f"00:00:{s:02d}"
+
+def fmt(val):
+    if val is None or val == "N/A" or val == "":
+        return "N/A"
+    try:
+        v = float(val)
+        abs_v = abs(v)
+        if abs_v >= 0.01 or abs_v == 0:
+            return f"{v:.3f}"
+        else:
+            return f"{v:.2e}"
+    except:
+        return "N/A"
+
+def get_openfoam_processes():
+    processes = {}
+    try:
+        pids = os.listdir('/proc')
+    except:
+        return processes
+        
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f'/proc/{pid}/comm', 'r') as f:
+                comm = f.read().strip()
+                
+            if comm in ['bash', 'zsh', 'systemd', 'kworker', 'python', 'python3', 'sshd', 'tmux']:
+                continue
+                
+            cwd = os.readlink(f'/proc/{pid}/cwd')
+            if not cwd or cwd == '/':
+                continue
+                
+            control_dict = os.path.join(cwd, 'system', 'controlDict')
+            if os.path.isfile(control_dict):
+                app = get_foam_application(cwd)
+                if app == comm or comm.endswith('Foam') or 'interFlow' in comm:
+                    key = (cwd, comm)
+                    if key not in processes:
+                        processes[key] = []
+                    processes[key].append(pid)
+        except:
+            continue
+    return processes
+
+def build_output(args):
+    global last_known_metrics
+    processes = get_openfoam_processes()
+    out = []
+    
+    if not processes:
+        out.append("No OpenFOAM processes found.")
+        return out
+        
+    separator = "=" * 80
+    first = True
+    
+    for (cwd, comm), pids in processes.items():
+        pid = pids[0]
+        app = get_foam_application(cwd) or comm
+        nProcs = len(pids)
+        log_file = get_active_log_file(pid, cwd)
+        
+        key = (cwd, pid)
+        if key not in last_known_metrics:
+            last_known_metrics[key] = {
+                'dt': None, 'c_mean': 'N/A', 'c_max': 'N/A',
+                'ic_mean': 'N/A', 'ic_max': 'N/A', 'cap_num': None,
+                'cells': None, 'iter_speed': 0.0, 'eta_sec': 0.0
+            }
+        cache = last_known_metrics[key]
+
+        if args.full:
+            if not first:
+                out.append("")
+            out.append(separator)
+            out.append("")
+                
+            out.append(f"[INFO]  {'Case Folder':<25} : {os.path.basename(cwd)}")
+            out.append(f"[INFO]  {'Solver':<25} : {app}")
+            
+            if nProcs > 1:
+                out.append(f"[INFO]  {'Execution':<25} : Parallel ({nProcs} cores)")
+            else:
+                out.append(f"[INFO]  {'Execution':<25} : Serial (1 core)")
+                
+            end_time_val = get_control_dict_value(cwd, 'endTime')
+            end_time = float(end_time_val) if end_time_val else None
+            
+            if end_time_val:
+                out.append(f"[INFO]  {'Target endTime':<25} : {end_time_val} s")
+            
+            wi = get_write_interval(cwd)
+            if wi:
+                out.append(f"[INFO]  {'Write Interval':<25} : {wi} s")
+            
+            mesh_type = get_mesh_type(cwd)
+            out.append(f"[INFO]  {'Mesh Type':<25} : {mesh_type}")
+            
+            mesh_status, cell_count = get_mesh_info(cwd)
+            if mesh_status != "Unknown":
+                out.append(f"[INFO]  {'Mesh Status':<25} : {mesh_status}")
+            if cell_count != "Unknown":
+                out.append(f"[INFO]  {'Initial Cell Count':<25} : {cell_count}")
+                if nProcs > 1:
+                    try:
+                        cells_per_proc = int(cell_count.replace(' ', '')) // nProcs
+                        out.append(f"[INFO]  {'Initial Cells per Core':<25} : {cells_per_proc:,}".replace(",", " "))
+                    except:
+                        pass
+                    
+            out.append("")
+            
+            start_time = 0.0
+            st_val = get_control_dict_value(cwd, 'startTime')
+            if get_control_dict_value(cwd, 'startFrom') == 'startTime' and st_val:
+                try:
+                    start_time = float(st_val)
+                    out.append(f"[INFO]  {'Starting from':<25} : {st_val} s")
+                except:
+                    out.append(f"[INFO]  {'Starting from':<25} : 0 s")
+            else:
+                out.append(f"[INFO]  {'Starting from':<25} : 0 s")
+                
+            out.append("")
+            
+            curr_time = get_current_time(pid, cwd, log_file)
+            metrics = get_log_metrics(log_file)
+            latest_saved = get_current_time_from_dirs(cwd)
+            
+            if metrics['dt'] is not None: cache['dt'] = metrics['dt']
+            if metrics['c_mean'] != 'N/A': cache['c_mean'] = metrics['c_mean']
+            if metrics['c_max'] != 'N/A': cache['c_max'] = metrics['c_max']
+            if metrics['ic_mean'] != 'N/A': cache['ic_mean'] = metrics['ic_mean']
+            if metrics['ic_max'] != 'N/A': cache['ic_max'] = metrics['ic_max']
+            if metrics['cap_num'] is not None: cache['cap_num'] = metrics['cap_num']
+            if metrics['cells'] is not None: cache['cells'] = metrics['cells']
+
+            if curr_time is not None and end_time is not None and end_time > start_time:
+                prog = (curr_time - start_time) / (end_time - start_time) * 100
+                prog = max(0.0, min(100.0, prog))
+                bar_len = 40
+                filled = int((prog / 100) * bar_len)
+                bar = '['
+                for i in range(bar_len):
+                    if i < filled: bar += '#'
+                    elif i == filled: bar += '>'
+                    else: bar += '-'
+                bar += ']'
+                out.append(f"Progress                 : {bar} {prog:.1f}%")
+            else:
+                out.append(f"Progress                 : [ Status Unknown ]")
+                
+            if curr_time is not None:
+                out.append(f"Time (t)                 : {fmt(curr_time)} s")
+            
+            if cache['dt'] is not None:
+                out.append(f"Timestep (dt)            : {fmt(cache['dt'])} s")
+                
+            if latest_saved is not None:
+                out.append(f"Latest Saved Timestep    : {fmt(latest_saved)} s")
+            
+            c_count = cache['cells'] if cache['cells'] else (cell_count if cell_count != "Unknown" else None)
+            if c_count:
+                out.append(f"Cell Count               : {c_count}")
+                if nProcs > 1:
+                    try:
+                        cc_val = int(c_count.replace(' ', '')) // nProcs
+                        out.append(f"Cells per Core           : {cc_val:,}".replace(",", " "))
+                    except:
+                        pass
+                        
+            if cache['c_mean'] != 'N/A' or cache['c_max'] != 'N/A':
+                out.append(f"Courant Number           : mean: {fmt(cache['c_mean'])} max: {fmt(cache['c_max'])}")
+            
+            if cache['ic_mean'] != 'N/A' or cache['ic_max'] != 'N/A':
+                out.append(f"Interface Courant Number : mean: {fmt(cache['ic_mean'])} max: {fmt(cache['ic_max'])}")
+            
+            if cache['cap_num'] is not None:
+                out.append(f"Capillary Number         : {fmt(cache['cap_num'])}")
+                
+            t_list = metrics['t']
+            exec_list = metrics['exec']
+            
+            n_steps = min(len(t_list), len(exec_list))
+            if n_steps > 1:
+                idx = max(0, n_steps - 11)
+                steps = n_steps - 1 - idx
+                if steps > 0:
+                    iter_speed = (exec_list[-1] - exec_list[idx]) / steps
+                    sim_speed = (t_list[-1] - t_list[idx]) / (exec_list[-1] - exec_list[idx]) if (exec_list[-1] - exec_list[idx]) > 0 else 0
+                    if sim_speed > 0 and end_time is not None and curr_time is not None:
+                        eta_sec = (end_time - curr_time) / sim_speed
+                        
+                    if iter_speed > 0:
+                        cache['iter_speed'] = iter_speed
+                        cache['eta_sec'] = eta_sec
+                        
+            out.append(f"Iteration Speed          : {cache['iter_speed']:.2f} s/it")
+            
+            elapsed_sec = get_elapsed_time(pid)
+            if elapsed_sec is not None:
+                elapsed_str = format_time(elapsed_sec)
+                if cache['iter_speed'] > 0:
+                    out.append(f"Elapsed                  : {elapsed_str} | ETA: {format_time(cache['eta_sec'])}")
+                else:
+                    out.append(f"Elapsed                  : {elapsed_str} | ETA: Calculating...")
+                
+        else:
+            if not first:
+                out.append("")
+                
+            end_time_val = get_control_dict_value(cwd, 'endTime')
+            end_time = float(end_time_val) if end_time_val else None
+            
+            start_time = 0.0
+            if get_control_dict_value(cwd, 'startFrom') == 'startTime':
+                st = get_control_dict_value(cwd, 'startTime')
+                if st:
+                    try: start_time = float(st)
+                    except: pass
+                    
+            out.append(f"{'Case Dir':<8} : {os.path.basename(cwd)}")
+            
+            elapsed_sec = get_elapsed_time(pid)
+            elapsed_str = format_time(elapsed_sec)
+            if elapsed_str:
+                out.append(f"{'Elapsed':<8} : {elapsed_str}")
+            
+            curr_time = get_current_time(pid, cwd, log_file)
+            
+            if curr_time is not None and end_time is not None and end_time > start_time:
+                prog = (curr_time - start_time) / (end_time - start_time)
+                prog = max(0.0, min(1.0, prog))
+                
+                pct = prog * 100
+                bar_len = 40
+                filled = int(prog * bar_len)
+                bar = '=' * filled + ('>' if filled < bar_len else '')
+                bar = bar.ljust(bar_len)
+                
+                out.append(f"  {pct:5.1f}% [{bar}] (Time: {curr_time:g} / {end_time:g})")
+            else:
+                curr_str = f"{curr_time:g}" if curr_time is not None else "Unknown"
+                end_str = f"{end_time:g}" if end_time is not None else "Unknown"
+                out.append(f"  [ Status unknown ] (Current: {curr_str}, End: {end_str})")
+                
+        first = False
+
+    return out
+
+def main():
+    parser = argparse.ArgumentParser(description="Monitor OpenFOAM solver progress")
+    parser.add_argument('-m', '--monitor', action='store_true', help="Monitor continuously (like watch)")
+    parser.add_argument('-f', '--full', action='store_true', help="Show full simulation details (like runCase)")
+    args = parser.parse_args()
+
+    if not args.monitor:
+        out = build_output(args)
+        print('\n'.join(out).strip())
+        return
+
+    import curses
+    
+    def run_curses(stdscr):
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+        except:
+            pass
+        try:
+            curses.curs_set(0) # Hide cursor
+        except:
+            pass
+        stdscr.timeout(100) # 100 ms timeout for getch polling
+        
+        scroll_y = 0
+        last_update = 0
+        out = []
+        
+        while True:
+            now = time.time()
+            
+            # Fetch data once per second
+            if now - last_update >= 1.0:
+                out = build_output(args)
+                last_update = now
+                
+            ch = stdscr.getch()
+            height, width = stdscr.getmaxyx()
+            
+            if ch == ord('q') or ch == ord('Q') or ch == 3: # 'q' or Ctrl+C
+                break
+            elif ch == curses.KEY_UP:
+                scroll_y -= 1
+            elif ch == curses.KEY_DOWN:
+                scroll_y += 1
+            elif ch == curses.KEY_PPAGE:
+                scroll_y -= height - 1
+            elif ch == curses.KEY_NPAGE:
+                scroll_y += height - 1
+            elif ch == curses.KEY_RESIZE:
+                pass # Trigger a redraw with new dimensions
+                
+            max_scroll = max(0, len(out) - height)
+            scroll_y = max(0, min(scroll_y, max_scroll))
+            
+            stdscr.erase()
+            for i in range(height):
+                line_idx = scroll_y + i
+                if line_idx < len(out):
+                    line_str = out[line_idx][:width-1]
+                    try:
+                        stdscr.addstr(i, 0, line_str)
+                    except curses.error:
+                        pass
+                        
+            if max_scroll > 0:
+                footer = " [Use UP/DOWN/PAGE_UP/PAGE_DOWN to scroll. Press 'q' to quit.] "
+                if len(footer) < width:
+                    try:
+                        stdscr.addstr(height - 1, width - len(footer) - 1, footer, curses.A_REVERSE)
+                    except curses.error:
+                        pass
+                        
+            stdscr.refresh()
+            
+    try:
+        curses.wrapper(run_curses)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"Error in monitor mode: {e}")
+
+if __name__ == '__main__':
+    main()
