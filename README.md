@@ -1,6 +1,6 @@
-# foamTools-OpenFOAM
+# foam-run-monitor
 
-A collection of robust utility scripts designed to streamline the execution and monitoring of OpenFOAM simulations.
+A collection of robust utility scripts designed to streamline the execution and monitoring of OpenFOAM® simulations.
 
 ---
 
