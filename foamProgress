@@ -466,8 +466,7 @@ def build_output(args):
                 bar_len = 40
                 filled = int(prog * bar_len)
                 bar = '▓' * filled + '░' * (bar_len - filled)
-                
-                out.append(f"  {pct:5.1f}% [{bar}] (Time: {fmt(curr_time)} / {fmt(end_time)}){dt_str}")
+                out.append(f"  {pct:5.1f}% {bar} (Time: {fmt(curr_time)} / {fmt(end_time)}){dt_str}")
             else:
                 curr_str = fmt(curr_time) if curr_time is not None else "Unknown"
                 end_str = fmt(end_time) if end_time is not None else "Unknown"
