@@ -58,6 +58,14 @@ foamProgress [OPTIONS]
 | `-m, --monitor` | Launches an interactive, live-updating TUI dashboard (similar to `htop`). Supports scrolling. Press `q` to exit. |
 | `-f, --full` | Expands the output to display comprehensive details mimicking `runCase`, including Courant numbers, mesh types, and ETA. |
 
+### Examples
+
+**Standard Monitoring Dashboard:**
+![foamProgress](Images/foamProgress.png)
+
+**Full Monitoring Dashboard (`-f`):**
+![foamProgress full](Images/foamProgress%20full.png)
+
 ---
 
 ## Under the Hood
