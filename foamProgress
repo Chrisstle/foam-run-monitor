@@ -5,6 +5,21 @@ import sys
 import time
 import argparse
 
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+# Add any custom solver names or keywords here. By default, foamProgress
+# will track processes whose names end with 'Foam' or match the exact application 
+# name in controlDict. 
+#
+# If you use custom solvers, add a substring of the solver name to this list.
+# For example, adding 'interFlow' will match any process name that contains 
+# 'interFlow' (e.g. 'interFlow', 'interFlow_fixed', 'my_interFlow').
+CUSTOM_SOLVERS = [
+    'interFlow'
+]
+# ==============================================================================
+
 last_known_metrics = {}
 
 def get_foam_application(cwd):
@@ -294,7 +309,7 @@ def get_openfoam_processes():
             control_dict = os.path.join(cwd, 'system', 'controlDict')
             if os.path.isfile(control_dict):
                 app = get_foam_application(cwd)
-                if app == comm or comm.endswith('Foam') or 'interFlow' in comm:
+                if app == comm or comm.endswith('Foam') or any(solver in comm for solver in CUSTOM_SOLVERS):
                     key = (cwd, comm)
                     if key not in processes:
                         processes[key] = []
