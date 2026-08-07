@@ -388,12 +388,7 @@ def build_output(args):
                 prog = max(0.0, min(100.0, prog))
                 bar_len = 40
                 filled = int((prog / 100) * bar_len)
-                bar = '['
-                for i in range(bar_len):
-                    if i < filled: bar += '#'
-                    elif i == filled: bar += '>'
-                    else: bar += '-'
-                bar += ']'
+                bar = '▓' * filled + '░' * (bar_len - filled)
                 out.append(f"Progress                 : {bar} {prog:.1f}%")
             else:
                 out.append(f"Progress                 : [ Status Unknown ]")
