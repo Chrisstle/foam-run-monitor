@@ -35,6 +35,7 @@ You must specify exactly one of the following modes to run the script:
 | Flag | Description |
 | :--- | :--- |
 | `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. |
+| `-h, --help` | Show the help message and exit. |
 
 ---
 
@@ -58,6 +59,7 @@ foamProgress [OPTIONS]
 | *(None)* | Prints a static, minimalistic one-time summary of all running simulations. |
 | `-m, --monitor` | Launches an interactive, live-updating TUI dashboard (similar to `htop`). Supports scrolling. Press `q` to exit. |
 | `-f, --full` | Expands the output to display comprehensive details mimicking `runCase`, including Courant numbers, mesh types, and ETA. |
+| `-h, --help` | Show the help message and exit. |
 
 ### Examples
 

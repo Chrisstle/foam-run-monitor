@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Usage: runCase [-n|--new] [-c|--continue] [-r|--reconstruct]
+# Usage: runCase [-n|--new] [-c|--continue] [-r|--reconstruct] [-h|--help]
 
 # -----------------------------------------------------------------------------
 # 1. Setup and Solver Detection
@@ -12,6 +12,20 @@ customNP=""
 while [[ "$#" -gt 0 ]]
 do
     case $1 in
+        -h|--help)
+            echo "Usage: runCase [MODE] [OPTIONS]"
+            echo ""
+            echo "Modes:"
+            echo "  -n,  --new          Starts a new simulation. Cleans the case directory."
+            echo "  -c,  --continue     Continues an existing simulation from the latestTime."
+            echo "  -r,  --reconstruct  Performs manual reconstruction on a stopped parallel run."
+            echo "  -clean              Cleans the case directory immediately."
+            echo ""
+            echo "Options:"
+            echo "  -np <number>        Overrides numberOfSubdomains to use <number> processors."
+            echo "  -h,  --help         Show this help message and exit."
+            exit 0
+            ;;
         -n|--new) mode="new" ;;
         -c|--continue) mode="continue" ;;
         -r|--reconstruct) mode="reconstruct" ;;
@@ -33,6 +47,7 @@ done
 if [[ -z "$mode" ]]
 then
     echo "Usage: runCase [-n|--new] OR [-c|--continue] OR [-r|--reconstruct] OR [-clean] [-np ##]"
+    echo "Use -h or --help for more information."
     exit 1
 fi
 
