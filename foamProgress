@@ -165,6 +165,17 @@ def get_current_time(pid, cwd, log_file):
             pass
     return get_current_time_from_dirs(cwd)
 
+def get_latest_cells(log_file):
+    if log_file:
+        try:
+            with os.popen(f"tac {log_file} 2>/dev/null | grep -m 1 -iE '^[[:space:]]*(number of cells|cells:)'") as f:
+                content = f.read().strip()
+                if content:
+                    return ''.join(filter(str.isdigit, content))
+        except:
+            pass
+    return None
+
 def get_log_metrics(log_file):
     metrics = {
         't': [], 'dt': None, 'exec': [], 'c_mean': 'N/A', 'c_max': 'N/A', 
@@ -308,6 +319,8 @@ def build_output(args):
         end_time = float(end_time_val) if end_time_val else None
 
         metrics = get_log_metrics(log_file)
+        if cache['cells'] is None:
+            cache['cells'] = get_latest_cells(log_file)
         if metrics['dt'] is not None: cache['dt'] = metrics['dt']
         if metrics['c_mean'] != 'N/A': cache['c_mean'] = metrics['c_mean']
         if metrics['c_max'] != 'N/A': cache['c_max'] = metrics['c_max']
@@ -404,10 +417,16 @@ def build_output(args):
             
             c_count = cache['cells'] if cache['cells'] else (cell_count if cell_count != "Unknown" else None)
             if c_count:
-                out.append(f"Cell Count               : {c_count}")
+                try:
+                    c_val = int(str(c_count).replace(' ', ''))
+                    c_count_str = f"{c_val:,}".replace(",", " ")
+                except:
+                    c_count_str = str(c_count)
+                
+                out.append(f"Cell Count               : {c_count_str}")
                 if nProcs > 1:
                     try:
-                        cc_val = int(c_count.replace(' ', '')) // nProcs
+                        cc_val = int(str(c_count).replace(' ', '')) // nProcs
                         out.append(f"Cells per Core           : {cc_val:,}".replace(",", " "))
                     except:
                         pass
