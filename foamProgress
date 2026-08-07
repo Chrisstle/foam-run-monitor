@@ -168,10 +168,18 @@ def get_current_time(pid, cwd, log_file):
 def get_latest_cells(log_file):
     if log_file:
         try:
-            with os.popen(f"tac {log_file} 2>/dev/null | grep -m 1 -iE '^[[:space:]]*(number of cells|cells:)'") as f:
-                content = f.read().strip()
-                if content:
-                    return ''.join(filter(str.isdigit, content))
+            with os.popen(f"tac '{log_file}' 2>/dev/null") as f:
+                for line in f:
+                    if re.match(r'^\s*(number of cells|cells:)', line, re.I):
+                        return ''.join(filter(str.isdigit, line))
+                    elif 'cells for refinement out of ' in line:
+                        parts = line.split('out of ')
+                        if len(parts) > 1:
+                            return ''.join(filter(str.isdigit, parts[1]))
+                    elif ('Refined from ' in line or 'Unrefined from ' in line) and ' to ' in line:
+                        parts = line.split(' to ')
+                        if len(parts) > 1:
+                            return ''.join(filter(str.isdigit, parts[1].split(' cells')[0]))
         except:
             pass
     return None
@@ -209,6 +217,14 @@ def get_log_metrics(log_file):
                         metrics['cap_num'] = parts[-1]
                 elif re.match(r'^\s*(number of cells|cells:)', line, re.I):
                     metrics['cells'] = ''.join(filter(str.isdigit, line))
+                elif 'cells for refinement out of ' in line:
+                    parts = line.split('out of ')
+                    if len(parts) > 1:
+                        metrics['cells'] = ''.join(filter(str.isdigit, parts[1]))
+                elif ('Refined from ' in line or 'Unrefined from ' in line) and ' to ' in line:
+                    parts = line.split(' to ')
+                    if len(parts) > 1:
+                        metrics['cells'] = ''.join(filter(str.isdigit, parts[1].split(' cells')[0]))
     except:
         pass
     return metrics
