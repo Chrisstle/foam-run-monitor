@@ -396,13 +396,11 @@ else
             eta_sec = (speed > 0 && end_time > curr_t) ? (end_time - curr_t) / speed : 0
 
             bar_len = 40; filled = int((prog / 100) * bar_len)
-            bar = "["
+            bar = ""
             for(i=0; i<bar_len; i++) {
-                if(i < filled) bar = bar "#"
-                else if(i == filled) bar = bar ">"
-                else bar = bar "-"
+                if(i < filled) bar = bar "▓"
+                else bar = bar "░"
             }
-            bar = bar "]"
 
             eh = int(curr_exec/3600); em = int((curr_exec%3600)/60); es = int(curr_exec%60)
             th = int(eta_sec/3600); tm = int((eta_sec%3600)/60); ts = int(eta_sec%60)
@@ -509,13 +507,11 @@ then
                 
                 bar_len = 40
                 filled = int((prog / 100) * bar_len)
-                bar = "["
+                bar = ""
                 for(i=0; i<bar_len; i++) {
-                    if(i < filled) bar = bar "#"
-                    else if(i == filled) bar = bar ">"
-                    else bar = bar "-"
+                    if(i < filled) bar = bar "▓"
+                    else bar = bar "░"
                 }
-                bar = bar "]"
                 
                 printf "Progress                 : %s %.1f%%\n", bar, prog
                 printf "Reconstructing Timestep  : %s s\n", lastTime
