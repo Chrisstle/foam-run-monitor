@@ -415,8 +415,8 @@ def build_output(args):
             if latest_saved is not None:
                 out.append(f"Latest Saved Timestep    : {fmt(latest_saved)} s")
             
-            c_count = cache['cells'] if cache['cells'] else (cell_count if cell_count != "Unknown" else None)
-            if c_count:
+            c_count = cache['cells'] if cache['cells'] else (cell_count if cell_count != "Unknown" else "Unknown")
+            if c_count != "Unknown" or mesh_type == "Dynamic (AMR)":
                 try:
                     c_val = int(str(c_count).replace(' ', ''))
                     c_count_str = f"{c_val:,}".replace(",", " ")
@@ -429,8 +429,9 @@ def build_output(args):
                         cc_val = int(str(c_count).replace(' ', '')) // nProcs
                         out.append(f"Cells per Core           : {cc_val:,}".replace(",", " "))
                     except:
-                        pass
-                        
+                        if c_count_str == "Unknown":
+                            out.append(f"Cells per Core           : Unknown")
+                            
             if cache['c_mean'] != 'N/A' or cache['c_max'] != 'N/A':
                 out.append(f"Courant Number           : mean: {fmt(cache['c_mean'])} max: {fmt(cache['c_max'])}")
             
