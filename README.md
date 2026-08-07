@@ -11,6 +11,7 @@ A collection of robust utility scripts designed to streamline the execution and 
 ### Features
 - **Smart Initialization**: Automatically reads `controlDict`, `decomposeParDict`, and `dynamicMeshDict` to determine the solver, execution mode (serial/parallel), target end time, and mesh type.
 - **Mesh Validation**: Runs a pre-flight `checkMesh` to ensure mesh validity before starting the solver.
+- **Active Monitoring**: Active monitoring of the case, similar in style as `foamProgress` (see examples below).
 - **Automated Reconstruction**: Automatically handles `reconstructParMesh` (if a dynamic mesh is used) followed by `reconstructPar` at the end of a parallel run, cleaning up processor directories upon success.
 - **Failsafe Mechanisms**: Gracefully intercepts `Ctrl+C` to cleanly kill background solvers. Skips cleanup if reconstruction encounters errors, preserving your `processor*` directories.
 
