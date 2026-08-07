@@ -303,6 +303,33 @@ def build_output(args):
             }
         cache = last_known_metrics[key]
 
+        curr_time = get_current_time(pid, cwd, log_file)
+        end_time_val = get_control_dict_value(cwd, 'endTime')
+        end_time = float(end_time_val) if end_time_val else None
+
+        metrics = get_log_metrics(log_file)
+        if metrics['dt'] is not None: cache['dt'] = metrics['dt']
+        if metrics['c_mean'] != 'N/A': cache['c_mean'] = metrics['c_mean']
+        if metrics['c_max'] != 'N/A': cache['c_max'] = metrics['c_max']
+        if metrics['ic_mean'] != 'N/A': cache['ic_mean'] = metrics['ic_mean']
+        if metrics['ic_max'] != 'N/A': cache['ic_max'] = metrics['ic_max']
+        if metrics['cap_num'] is not None: cache['cap_num'] = metrics['cap_num']
+        if metrics['cells'] is not None: cache['cells'] = metrics['cells']
+
+        t_list = metrics['t']
+        exec_list = metrics['exec']
+        n_steps = min(len(t_list), len(exec_list))
+        if n_steps > 1:
+            idx = max(0, n_steps - 11)
+            steps = n_steps - 1 - idx
+            if steps > 0:
+                iter_speed = (exec_list[-1] - exec_list[idx]) / steps
+                sim_speed = (t_list[-1] - t_list[idx]) / (exec_list[-1] - exec_list[idx]) if (exec_list[-1] - exec_list[idx]) > 0 else 0
+                if sim_speed > 0 and end_time is not None and curr_time is not None:
+                    cache['eta_sec'] = (end_time - curr_time) / sim_speed
+                if iter_speed > 0:
+                    cache['iter_speed'] = iter_speed
+
         if args.full:
             if not first:
                 out.append("")
@@ -317,9 +344,6 @@ def build_output(args):
             else:
                 out.append(f"[INFO]  {'Execution':<25} : Serial (1 core)")
                 
-            end_time_val = get_control_dict_value(cwd, 'endTime')
-            end_time = float(end_time_val) if end_time_val else None
-            
             if end_time_val:
                 out.append(f"[INFO]  {'Target endTime':<25} : {end_time_val} s")
             
@@ -357,17 +381,7 @@ def build_output(args):
                 
             out.append("")
             
-            curr_time = get_current_time(pid, cwd, log_file)
-            metrics = get_log_metrics(log_file)
             latest_saved = get_current_time_from_dirs(cwd)
-            
-            if metrics['dt'] is not None: cache['dt'] = metrics['dt']
-            if metrics['c_mean'] != 'N/A': cache['c_mean'] = metrics['c_mean']
-            if metrics['c_max'] != 'N/A': cache['c_max'] = metrics['c_max']
-            if metrics['ic_mean'] != 'N/A': cache['ic_mean'] = metrics['ic_mean']
-            if metrics['ic_max'] != 'N/A': cache['ic_max'] = metrics['ic_max']
-            if metrics['cap_num'] is not None: cache['cap_num'] = metrics['cap_num']
-            if metrics['cells'] is not None: cache['cells'] = metrics['cells']
 
             if curr_time is not None and end_time is not None and end_time > start_time:
                 prog = (curr_time - start_time) / (end_time - start_time) * 100
@@ -412,23 +426,6 @@ def build_output(args):
             if cache['cap_num'] is not None:
                 out.append(f"Capillary Number         : {fmt(cache['cap_num'])}")
                 
-            t_list = metrics['t']
-            exec_list = metrics['exec']
-            
-            n_steps = min(len(t_list), len(exec_list))
-            if n_steps > 1:
-                idx = max(0, n_steps - 11)
-                steps = n_steps - 1 - idx
-                if steps > 0:
-                    iter_speed = (exec_list[-1] - exec_list[idx]) / steps
-                    sim_speed = (t_list[-1] - t_list[idx]) / (exec_list[-1] - exec_list[idx]) if (exec_list[-1] - exec_list[idx]) > 0 else 0
-                    if sim_speed > 0 and end_time is not None and curr_time is not None:
-                        eta_sec = (end_time - curr_time) / sim_speed
-                        
-                    if iter_speed > 0:
-                        cache['iter_speed'] = iter_speed
-                        cache['eta_sec'] = eta_sec
-                        
             out.append(f"Iteration Speed          : {cache['iter_speed']:.2f} s/it")
             
             elapsed_sec = get_elapsed_time(pid)
@@ -443,9 +440,6 @@ def build_output(args):
             if not first:
                 out.append("")
                 
-            end_time_val = get_control_dict_value(cwd, 'endTime')
-            end_time = float(end_time_val) if end_time_val else None
-            
             start_time = 0.0
             if get_control_dict_value(cwd, 'startFrom') == 'startTime':
                 st = get_control_dict_value(cwd, 'startTime')
@@ -458,10 +452,12 @@ def build_output(args):
             elapsed_sec = get_elapsed_time(pid)
             elapsed_str = format_time(elapsed_sec)
             if elapsed_str:
-                out.append(f"{'Elapsed':<8} : {elapsed_str}")
+                if cache['iter_speed'] > 0:
+                    out.append(f"{'Elapsed':<8} : {elapsed_str} | ETA: {format_time(cache['eta_sec'])}")
+                else:
+                    out.append(f"{'Elapsed':<8} : {elapsed_str} | ETA: Calculating...")
             
-            curr_time = get_current_time(pid, cwd, log_file)
-            
+            dt_str = f" | dt: {fmt(cache['dt'])}" if cache['dt'] is not None else ""
             if curr_time is not None and end_time is not None and end_time > start_time:
                 prog = (curr_time - start_time) / (end_time - start_time)
                 prog = max(0.0, min(1.0, prog))
@@ -472,11 +468,11 @@ def build_output(args):
                 bar = '=' * filled + ('>' if filled < bar_len else '')
                 bar = bar.ljust(bar_len)
                 
-                out.append(f"  {pct:5.1f}% [{bar}] (Time: {curr_time:g} / {end_time:g})")
+                out.append(f"  {pct:5.1f}% [{bar}] (Time: {fmt(curr_time)} / {fmt(end_time)}){dt_str}")
             else:
-                curr_str = f"{curr_time:g}" if curr_time is not None else "Unknown"
-                end_str = f"{end_time:g}" if end_time is not None else "Unknown"
-                out.append(f"  [ Status unknown ] (Current: {curr_str}, End: {end_str})")
+                curr_str = fmt(curr_time) if curr_time is not None else "Unknown"
+                end_str = fmt(end_time) if end_time is not None else "Unknown"
+                out.append(f"  [ Status unknown ] (Current: {curr_str}, End: {end_str}){dt_str}")
                 
         first = False
 
