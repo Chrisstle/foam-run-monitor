@@ -15,6 +15,7 @@ batchJobs=1
 batchCases=()
 originalArgs=()
 animate=false
+animArgs=()
 
 while [[ "$#" -gt 0 ]]
 do
@@ -32,6 +33,8 @@ do
             echo "  -np <number>        Overrides numberOfSubdomains to use <number> processors."
             echo "  -q,  --quiet        Suppresses interactive terminal output."
             echo "  -a,  --animate      Runs animateCase automatically when finished."
+            echo "                      Optional animation flags: -s|--state <file>, --fps <num>,"
+            echo "                                                --res <w> <h>, --field <name>"
             echo "  -b,  --batch        Batch mode. Any positional arguments after this are treated as case directories."
             echo "  -P,  --jobs <num>   Number of parallel jobs for batch processing (default 1)."
             echo "  -h,  --help         Show this help message and exit."
@@ -43,6 +46,10 @@ do
         -clean) mode="clean"; originalArgs+=("$1") ;;
         -q|--quiet) quiet=true; originalArgs+=("$1") ;;
         -a|--animate) animate=true ;;
+        -s|--state) animArgs+=("$1" "$2"); shift ;;
+        --fps) animArgs+=("$1" "$2"); shift ;;
+        --res) animArgs+=("$1" "$2" "$3"); shift 2 ;;
+        --field) animArgs+=("$1" "$2"); shift ;;
         -np) 
             if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]
             then
@@ -207,7 +214,7 @@ if [[ "$isBatch" == true ]]; then
         echo "[RUN]   Rendering animations for all batch cases..."
         
         if [[ ${#validCases[@]} -gt 0 ]]; then
-            animateCase -P "$batchJobs" "${validCases[@]}"
+            animateCase -P "$batchJobs" "${animArgs[@]}" "${validCases[@]}"
             
             # Rename crashed cases
             for i in "${!validCases[@]}"; do
@@ -756,9 +763,9 @@ if [[ "$animate" == true && "$isBatch" == false ]]; then
     echo ""
     if [[ "$quiet" == false ]]; then
         printf "[RUN]   %-40s\n" "Rendering animation"
-        animateCase
+        animateCase "${animArgs[@]}"
     else
-        animateCase > log/log.animateCase 2>&1
+        animateCase "${animArgs[@]}" > log/log.animateCase 2>&1
     fi
 fi
 

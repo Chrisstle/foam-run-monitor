@@ -40,6 +40,7 @@ You must specify exactly one of the following modes to run the script:
 | `-P, --jobs <num>`| Number of concurrent jobs to run in batch mode (default: 1). |
 | `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
 | `-a, --animate` | Triggers `animateCase` automatically when the simulation completes (or collectively at the end of a batch). |
+| `-s, --fps, --res, --field` | Optional flags to pass directly to `animateCase` when using `-a`. (e.g. `--fps 5 -s custom.pvsm`) |
 | `-h, --help` | Show the help message and exit. |
 
 ### Examples
