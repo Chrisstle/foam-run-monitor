@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 # 1. Setup and Solver Detection
 # -----------------------------------------------------------------------------
-clear
+if [[ "$quiet" == false ]]; then clear; fi
 
 mode=""
 customNP=""
@@ -44,12 +44,141 @@ do
     shift
 done
 
+
+if [[ -z "$mode" && "$isBatch" == false ]]
+then
+    echo "Usage: runCase [-n|--new] OR [-c|--continue] OR [-r|--reconstruct] OR [-clean] [-np ##]"
+    echo "Use -h or --help for more information."
+    exit 1
+fi
+
+if [[ "$isBatch" == true ]]; then
+    echo "================================================================================"
+    echo " runCase Batch Manager"
+    echo "================================================================================"
+    
+    validCases=()
+    for c in "${batchCases[@]}"; do
+        if [[ -d "$c" ]]; then
+            validCases+=("$(realpath "$c")")
+        else
+            echo "[WARN]  Skipping '$c' (not a directory)"
+        fi
+    done
+    
+    if [[ ${#validCases[@]} -eq 0 ]]; then
+        echo "[ERROR] No valid case directories provided for batch execution."
+        exit 1
+    fi
+    
+    echo ""
+    echo "[INFO]  Mode              : $mode"
+    if [[ -n "$customNP" ]]; then
+        echo "[INFO]  Parallel (MPI)    : $customNP cores per case"
+    else
+        echo "[INFO]  Parallel (MPI)    : Defined by decomposeParDict"
+    fi
+    echo "[INFO]  Batch Jobs (-P)   : $batchJobs"
+    echo "[INFO]  Total Cases       : ${#validCases[@]}"
+    
+    if [[ -n "$customNP" ]]; then
+        echo ""
+        echo "[INIT]  Applying -np $customNP to all cases..."
+        for c in "${validCases[@]}"; do
+            dict="$c/system/decomposeParDict"
+            if [[ -f "$dict" ]]; then
+                sed -i -E "s/^([[:space:]]*numberOfSubdomains[[:space:]]+)[0-9]+(;)/\1${customNP}\2/" "$dict"
+            else
+                echo "[WARN]  $dict not found in $(basename "$c")"
+            fi
+        done
+    fi
+    
+    echo ""
+    read -r -p "Proceed with batch execution? [y/N]: " reply
+    if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]; then
+        echo "[ABORT] Batch execution cancelled."
+        exit 1
+    fi
+    echo ""
+    
+    states=()
+    pids=()
+    for ((i=0; i<${#validCases[@]}; i++)); do states[$i]=0; pids[$i]=""; done
+    
+    running_jobs=0
+    next_job=0
+    spin_chars="/-\|"
+    spin_idx=0
+    lines_to_clear=${#validCases[@]}
+    
+    for ((i=0; i<$lines_to_clear; i++)); do echo ""; done
+    
+    while true; do
+        for i in "${!validCases[@]}"; do
+            if [[ "${states[$i]}" == 1 ]]; then
+                if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                    wait "${pids[$i]}"
+                    exit_status=$?
+                    if [[ $exit_status -eq 0 ]]; then
+                        states[$i]=2
+                    else
+                        states[$i]=3
+                    fi
+                    ((running_jobs--))
+                fi
+            fi
+        done
+        
+        while [[ $running_jobs -lt $batchJobs ]] && [[ $next_job -lt ${#validCases[@]} ]]; do
+            c_dir="${validCases[$next_job]}"
+            workerArgs=("${originalArgs[@]}")
+            if [[ "$quiet" == false ]]; then workerArgs+=("--quiet"); fi
+            
+            (cd "$c_dir" && "$0" "${workerArgs[@]}" > batch_worker.log 2>&1) &
+            pids[$next_job]=$!
+            states[$next_job]=1
+            
+            ((running_jobs++))
+            ((next_job++))
+        done
+        
+        spin_char="${spin_chars:$spin_idx:1}"
+        spin_idx=$(( (spin_idx + 1) % 4 ))
+        
+        echo -en "\033[${lines_to_clear}A"
+        
+        for i in "${!validCases[@]}"; do
+            c_name=$(basename "${validCases[$i]}")
+            if [[ "${states[$i]}" == 0 ]]; then status_text="Queued"; fi
+            if [[ "${states[$i]}" == 1 ]]; then status_text="[$spin_char] Running"; fi
+            if [[ "${states[$i]}" == 2 ]]; then status_text="Done"; fi
+            if [[ "${states[$i]}" == 3 ]]; then status_text="Crashed"; fi
+            printf "\033[2K%-40s : %s\n" "$c_name" "$status_text"
+        done
+        
+        all_done=true
+        for st in "${states[@]}"; do
+            if [[ "$st" -lt 2 ]]; then all_done=false; break; fi
+        done
+        if [[ "$all_done" == true ]]; then break; fi
+        sleep 0.5
+    done
+    
+    echo ""
+    echo "================================================================================"
+    echo " Batch Execution Complete!"
+    echo "================================================================================"
+    exit 0
+fi
+
 if [[ -z "$mode" ]]
 then
     echo "Usage: runCase [-n|--new] OR [-c|--continue] OR [-r|--reconstruct] OR [-clean] [-np ##]"
     echo "Use -h or --help for more information."
     exit 1
 fi
+
 
 if [[ "$mode" == "clean" ]]
 then
@@ -151,7 +280,7 @@ then
     while kill -0 "$check_pid" 2>/dev/null
     do
         sleep 1
-        printf "\r\033[2K[INIT]  %-25s : Checking Mesh%s" "Mesh Check" "$dots"
+        if [[ "$quiet" == false ]]; then printf "\r\033[2K[INIT]  %-25s : Checking Mesh%s" "Mesh Check" "$dots"; fi
         case "$dots" in
             "")    dots="." ;;
             ".")   dots=".." ;;
@@ -278,7 +407,7 @@ else
             while kill -0 "$decomp_pid" 2>/dev/null
             do
                 sleep 1
-                printf "\r\033[2K[RUN]   Decomposing domain%s" "$dots"
+                if [[ "$quiet" == false ]]; then printf "\r\033[2K[RUN]   Decomposing domain%s" "$dots"; fi
                 case "$dots" in
                     "")    dots="." ;;
                     ".")   dots=".." ;;
@@ -307,7 +436,7 @@ else
     # Intercept Ctrl+C and kill the background solver process
     trap 'echo -e "\n[ABORT] User interrupt. Terminating solver..."; kill -TERM "$solver_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
 
-    echo -e "\n\n\n\n\n\n\n\n\n\n\n\n"
+    if [[ "$quiet" == false ]]; then echo -e "\n\n\n\n\n\n\n\n\n\n\n\n"; fi
 
     while kill -0 "$solver_pid" 2>/dev/null
     do
@@ -442,12 +571,14 @@ else
                 printf "Elapsed                  : %02d:%02d:%02d | ETA: Calculating...\n", eh, em, es
         }')
 
-        if [[ "$output" != "WAITING" ]] && [[ -n "$output" ]]
-        then
-            temp="${output//[^$'\n']/}"
-            num_lines=$(( ${#temp} + 1 ))
-            echo -en "\033[${num_lines}A"
-            while IFS= read -r line; do echo -e "\033[2K$line"; done <<< "$output"
+        if [[ "$quiet" == false ]]; then
+            if [[ "$output" != "WAITING" ]] && [[ -n "$output" ]]
+            then
+                temp="${output//[^$'\n']/}"
+                num_lines=$(( ${#temp} + 1 ))
+                echo -en "\033[${num_lines}A"
+                while IFS= read -r line; do echo -e "\033[2K$line"; done <<< "$output"
+            fi
         fi
     done
 
@@ -532,10 +663,12 @@ then
                 printf "Reconstructing Timestep  : %s s\n", lastTime
             }')
             
-            if [[ -n "$output" ]]
-            then
-                echo -en "\033[2A"
-                while IFS= read -r line; do echo -e "\033[2K$line"; done <<< "$output"
+            if [[ "$quiet" == false ]]; then
+                if [[ -n "$output" ]]
+                then
+                    echo -en "\033[2A"
+                    while IFS= read -r line; do echo -e "\033[2K$line"; done <<< "$output"
+                fi
             fi
         done
         
@@ -548,7 +681,7 @@ then
         if [ $reconstruct_exit_status -eq 0 ]
         then
             # Clear progress bar and Reconstructing Timestep lines
-            echo -en "\033[2A\033[2K\033[1B\033[2K\033[1A"
+            if [[ "$quiet" == false ]]; then echo -en "\033[2A\033[2K\033[1B\033[2K\033[1A"; fi
             
             printf "[CLEAN] %-40s\n" "Removing processor directories"
             rm -rf processor*
