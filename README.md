@@ -61,6 +61,11 @@ runCase -n -P 2 -b case1 case3 case4
 ```
 *Note: In batch mode, a live dashboard will appear to track the status (Queued, Running, Done, Crashed) of each case.*
 
+**Comprehensive Pipeline:**
+Clean the directory, decompose for 3 cores, run 2 jobs in parallel over all cases, and render customized animations at the end:
+```bash
+runCase --new -np 3 --jobs 2 --batch case* --animate --fps 5 --state set_up.pvsm
+```
 
 ## Under the Hood
 
@@ -136,6 +141,8 @@ animateCase [options] [cases...]
 | `--field <name>` | Field to focus on (default `alpha.water`). |
 | `-P, --jobs <int>` | Number of parallel jobs (default 1). |
 | `-h, --help` | Show the help message and exit. |
+
+*Note: The default settings for `animateCase` (like framerate, resolution, format) can be easily changed by editing the global variables at the very top of the `animateCase` python script file.*
 
 
 <sub>*OPENFOAM® is a registered trade mark of OpenCFD Limited, producer and distributor of the OpenFOAM software via www.openfoam.com. This offering is not approved or endorsed by OpenCFD Limited.*</sub>
