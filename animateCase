@@ -4,6 +4,8 @@ import os
 import sys
 import argparse
 import subprocess
+import shutil
+import glob
 import tempfile
 import xml.etree.ElementTree as ET
 from concurrent.futures import ProcessPoolExecutor
@@ -15,7 +17,30 @@ DEFAULT_FPS = 15
 DEFAULT_RESOLUTION = [1280, 720]
 DEFAULT_FIELD = 'alpha.water'
 DEFAULT_FORMAT = '.avi'
-PVPYTHON = "/home/christian/Programs/ParaView-5.11.2-MPI-Linux-Python3.9-x86_64/bin/pvpython"
+def find_pvpython():
+    pv_path = shutil.which('pvpython')
+    if pv_path:
+        return pv_path
+    
+    search_dirs = [
+        os.path.expanduser("~/Programs"),
+        os.path.expanduser("~/opt"),
+        "/opt",
+        "/usr/local",
+        "/usr/local/opt",
+        "C:/Program Files"
+    ]
+    
+    for d in search_dirs:
+        if not os.path.exists(d):
+            continue
+        matches = glob.glob(os.path.join(d, "ParaView*", "bin", "pvpython*"))
+        if matches:
+            return sorted(matches, reverse=True)[0]
+            
+    return None
+
+PVPYTHON = find_pvpython()
 # =============================================================================
 
 def find_openfoam_reader_name(state_file):
@@ -159,8 +184,9 @@ def main():
         print(f"No cases provided. Defaulting to current directory: {cases[0]}")
     
     # Check ParaView executable
-    if not os.path.exists(PVPYTHON):
-        print(f"Error: pvpython not found at {PVPYTHON}")
+    if not PVPYTHON or not os.path.exists(PVPYTHON):
+        print("Error: pvpython not found in PATH or common installation directories.")
+        print("Please add ParaView's bin directory to your PATH or set PVPYTHON manually in the script.")
         sys.exit(1)
         
     # Process State File if provided
