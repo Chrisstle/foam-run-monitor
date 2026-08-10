@@ -138,6 +138,7 @@ animateCase [options] [cases...]
 | :--- | :--- |
 | `-s, --state <file.pvsm>` | Use a state file instead of the default `alpha.water` visualization. |
 | `-f, --fps <int>` | Framerate (default 15). |
+| `--res <w> <h>` | Resolution width and height (default 1280 720). |
 | `--field <name>` | Field to focus on (default `alpha.water`). |
 | `-P, --jobs <int>` | Number of parallel jobs (default 1). |
 | `-h, --help` | Show the help message and exit. |
