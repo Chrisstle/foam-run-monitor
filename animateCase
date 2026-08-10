@@ -171,6 +171,7 @@ def main():
     parser.add_argument("-s", "--state", help="Path to a ParaView state file (.pvsm)")
     parser.add_argument("-f", "--fps", type=int, default=DEFAULT_FPS, help=f"Frames per second (default: {DEFAULT_FPS})")
     parser.add_argument("--field", default=DEFAULT_FIELD, help=f"Field to color by if no state file is used (default: {DEFAULT_FIELD})")
+    parser.add_argument("--res", type=int, nargs=2, default=DEFAULT_RESOLUTION, help=f"Resolution width and height (default: {DEFAULT_RESOLUTION[0]} {DEFAULT_RESOLUTION[1]})")
     parser.add_argument("-P", "--jobs", type=int, default=1, help="Number of parallel jobs (default: 1)")
     
     args = parser.parse_args()
@@ -236,7 +237,7 @@ def main():
     for case in cases:
         case_name = os.path.basename(case)
         out_file = os.path.join(out_dir, f"{case_name}{DEFAULT_FORMAT}")
-        tasks.append((script_path, case, out_file, args.fps, DEFAULT_RESOLUTION, args.field))
+        tasks.append((script_path, case, out_file, args.fps, args.res, args.field))
         
     try:
         if args.jobs > 1:
