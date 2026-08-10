@@ -53,6 +53,10 @@ Run a new simulation for all cases matching `case*`, running 2 cases concurrentl
 ```bash
 runCase -n -P 2 -b case*
 ```
+You can also explicitly list out the cases you want to run:
+```bash
+runCase -n -P 2 -b case1 case3 case4
+```
 *Note: In batch mode, a live dashboard will appear to track the status (Queued, Running, Done, Crashed) of each case.*
 
 
