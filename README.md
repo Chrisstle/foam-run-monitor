@@ -84,9 +84,35 @@ foamProgress [OPTIONS]
 ### Dynamic Mesh Handling
 If `dynamicFvMesh` (e.g., Adaptive Mesh Refinement) is detected in `constant/dynamicMeshDict`:
 1. `foamProgress` and `runCase` will dynamically display current cell counts by parsing the solver output.
-2. During reconstruction, `runCase` automatically executes `reconstructParMesh` before `reconstructPar`.
+2. During reconstruction, `runCase` automatically executes `reconstructParMesh`
+before `reconstructPar`.
 
+---
+
+## 3. animateCase
+
+`animateCase` is a Python-based utility wrapping ParaView's `pvpython` API that automates rendering OpenFOAM cases into animations locally.
+
+### Features
+- **Intelligent State File Parsing:** Supports ParaView state files (`.pvsm`). It automatically reads the XML to find the registered name of the OpenFOAM reader proxy and swaps the file paths for each new case seamlessly.
+- **Automated Directory Handling:** Creates `.foam` dummy files automatically.
+- **Batch Processing with Wildcards:** Takes a list of OpenFOAM case directories using shell expansion (e.g. `animateCase case*`).
+- **Parallel Processing:** Use the `-P` flag to spawn multiple `pvpython` subprocesses and render multiple videos concurrently.
+- **Smart Output Targeting:** Renders directly into the case directory for single cases, and generates an `Animations` folder to group the outputs for batch rendering.
+
+### Usage
+```bash
+animateCase [options] [cases...]
+```
+
+#### Options
+| Flag | Description |
+| :--- | :--- |
+| `-s, --state <file.pvsm>` | Use a state file instead of the default `alpha.water` visualization. |
+| `-f, --fps <int>` | Framerate (default 15). |
+| `--field <name>` | Field to focus on (default `alpha.water`). |
+| `-P, --jobs <int>` | Number of parallel jobs (default 1). |
+| `-h, --help` | Show the help message and exit. |
 
 
 <sub>*OPENFOAM® is a registered trade mark of OpenCFD Limited, producer and distributor of the OpenFOAM software via www.openfoam.com. This offering is not approved or endorsed by OpenCFD Limited.*</sub>
-

@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import argparse
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+from concurrent.futures import ProcessPoolExecutor
+
+# =============================================================================
+# DEFAULT SETTINGS
+# =============================================================================
+DEFAULT_FPS = 15
+DEFAULT_RESOLUTION = [1280, 720]
+DEFAULT_FIELD = 'alpha.water'
+DEFAULT_FORMAT = '.avi'
+PVPYTHON = "/home/christian/Programs/ParaView-5.11.2-MPI-Linux-Python3.9-x86_64/bin/pvpython"
+# =============================================================================
+
+def find_openfoam_reader_name(state_file):
+    try:
+        tree = ET.parse(state_file)
+        root = tree.getroot()
+        
+        # Find OpenFOAMReader IDs
+        reader_ids = []
+        for proxy in root.findall(".//Proxy"):
+            if proxy.get('type') == 'OpenFOAMReader':
+                reader_ids.append(proxy.get('id'))
+                
+        # Match IDs to registration names in ProxyCollection
+        for item in root.findall(".//ProxyCollection[@name='sources']/Item"):
+            if item.get('id') in reader_ids:
+                return item.get('name')
+    except Exception as e:
+        print(f"Warning: Could not parse state file to find reader name: {e}")
+    return None
+
+def get_unique_animations_dir(base_dir):
+    anim_dir = os.path.join(base_dir, "Animations")
+    if not os.path.exists(anim_dir):
+        return anim_dir
+    counter = 1
+    while True:
+        new_dir = os.path.join(base_dir, f"Animations {counter}")
+        if not os.path.exists(new_dir):
+            return new_dir
+        counter += 1
+
+def generate_pvpython_script(state_file, reader_name):
+    script_content = """import sys
+import os
+from paraview.simple import *
+
+case_dir = sys.argv[1]
+out_file = sys.argv[2]
+fps = int(sys.argv[3])
+res_x = int(sys.argv[4])
+res_y = int(sys.argv[5])
+field = sys.argv[6]
+
+case_name = os.path.basename(os.path.abspath(case_dir))
+foam_file = os.path.join(case_dir, f"{case_name}.foam")
+
+if not os.path.exists(foam_file):
+    with open(foam_file, 'w') as f: pass
+
+"""
+    if state_file:
+        script_content += f"""
+state_file = {repr(state_file)}
+reader_name = {repr(reader_name)}
+print(f"Loading state file {{state_file}}, replacing {{reader_name}} with {{foam_file}}")
+LoadState(state_file, filenames=[{{
+    "name": reader_name,
+    "FileName": foam_file
+}}])
+renderView = GetActiveViewOrCreate('RenderView')
+renderView.ViewSize = [res_x, res_y]
+"""
+    else:
+        script_content += """
+print(f"Loading {foam_file} and coloring by {field}")
+reader = OpenFOAMReader(registrationName=f"{case_name}.foam", FileName=foam_file)
+reader.MeshRegions = ['internalMesh']
+try:
+    reader.CellArrays = [field]
+except:
+    pass
+
+UpdatePipeline(time=0.0, proxy=reader)
+
+renderView = GetActiveViewOrCreate('RenderView')
+renderView.ViewSize = [res_x, res_y]
+
+display = Show(reader, renderView, 'UnstructuredGridRepresentation')
+display.Representation = 'Surface'
+ColorBy(display, ('CELLS', field))
+
+# Try to rescale transfer function if available
+try:
+    lut = GetColorTransferFunction(field.replace('.', ''))
+    lut.RescaleTransferFunction(0.0, 1.0)
+    pwf = GetOpacityTransferFunction(field.replace('.', ''))
+    pwf.RescaleTransferFunction(0.0, 1.0)
+except:
+    pass
+
+display.SetScalarBarVisibility(renderView, True)
+renderView.ResetCamera(False)
+
+# Add timer to the visualization
+try:
+    annotateTime = AnnotateTimeFilter(registrationName='AnnotateTime', Input=reader)
+    annotateTimeDisplay = Show(annotateTime, renderView, 'TextSourceRepresentation')
+    annotateTimeDisplay.WindowLocation = 'Upper RightCorner'
+    annotateTimeDisplay.FontSize = 24
+except Exception as e:
+    print(f"Could not add timer: {e}")
+
+"""
+    
+    script_content += """
+scene = GetAnimationScene()
+scene.UpdateAnimationUsingDataTimeSteps()
+
+print(f"Saving animation to {out_file} at {fps} fps...")
+SaveAnimation(out_file, renderView, ImageResolution=[res_x, res_y], FrameRate=fps)
+print("Done.")
+"""
+    return script_content
+
+def run_pvpython(script_path, case_dir, out_file, fps, res, field):
+    cmd = [PVPYTHON, script_path, case_dir, out_file, str(fps), str(res[0]), str(res[1]), field]
+    print(f"Starting render for: {os.path.basename(case_dir)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error rendering {case_dir}:\n{result.stderr}")
+    else:
+        print(f"Finished rendering: {os.path.basename(case_dir)}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Batch render OpenFOAM cases into animations using ParaView.")
+    parser.add_argument("cases", nargs="*", help="List of OpenFOAM case directories")
+    parser.add_argument("-s", "--state", help="Path to a ParaView state file (.pvsm)")
+    parser.add_argument("-f", "--fps", type=int, default=DEFAULT_FPS, help=f"Frames per second (default: {DEFAULT_FPS})")
+    parser.add_argument("--field", default=DEFAULT_FIELD, help=f"Field to color by if no state file is used (default: {DEFAULT_FIELD})")
+    parser.add_argument("-P", "--jobs", type=int, default=1, help="Number of parallel jobs (default: 1)")
+    
+    args = parser.parse_args()
+    
+    # Determine cases
+    cases = [os.path.abspath(c) for c in args.cases if os.path.isdir(c)]
+    
+    if not cases:
+        # Default to single case mode in current directory
+        cases = [os.getcwd()]
+        print(f"No cases provided. Defaulting to current directory: {cases[0]}")
+    
+    # Check ParaView executable
+    if not os.path.exists(PVPYTHON):
+        print(f"Error: pvpython not found at {PVPYTHON}")
+        sys.exit(1)
+        
+    # Process State File if provided
+    reader_name = None
+    if args.state:
+        args.state = os.path.abspath(args.state)
+        if not os.path.exists(args.state):
+            print(f"Error: State file not found at {args.state}")
+            sys.exit(1)
+        reader_name = find_openfoam_reader_name(args.state)
+        if not reader_name:
+            print("Error: Could not find an OpenFOAMReader proxy in the state file.")
+            sys.exit(1)
+        print(f"Found OpenFOAM reader in state file with registration name: '{reader_name}'")
+        
+    # Determine output directory strategy
+    current_dir = os.getcwd()
+    multiple_cases = len(cases) > 1
+    
+    if multiple_cases:
+        out_dir = get_unique_animations_dir(current_dir)
+        os.makedirs(out_dir)
+        print(f"\nMultiple cases detected. Animations will be saved to:\n  {out_dir}")
+        print("\nCases to process:")
+        for c in cases:
+            print(f"  - {os.path.basename(c)}")
+            
+        print(f"\nSettings:")
+        print(f"  FPS: {args.fps}")
+        print(f"  State file: {args.state if args.state else 'None (default ' + args.field + ')'}")
+        print(f"  Parallel jobs: {args.jobs}")
+        
+        reply = input("\nProceed with batch rendering? (y/n): ")
+        if reply.lower().strip() not in ['y', 'yes']:
+            print("Aborted.")
+            sys.exit(0)
+    else:
+        out_dir = cases[0] # Single case saves directly in the case directory
+        print(f"Processing single case. Animation will be saved to:\n  {out_dir}")
+        
+    # Create temp pvpython script
+    fd, script_path = tempfile.mkstemp(suffix=".py")
+    with os.fdopen(fd, 'w') as f:
+        f.write(generate_pvpython_script(args.state, reader_name))
+        
+    tasks = []
+    for case in cases:
+        case_name = os.path.basename(case)
+        out_file = os.path.join(out_dir, f"{case_name}{DEFAULT_FORMAT}")
+        tasks.append((script_path, case, out_file, args.fps, DEFAULT_RESOLUTION, args.field))
+        
+    try:
+        if args.jobs > 1:
+            with ProcessPoolExecutor(max_workers=args.jobs) as executor:
+                futures = [executor.submit(run_pvpython, *t) for t in tasks]
+                for future in futures:
+                    future.result() # Wait for completion
+        else:
+            for t in tasks:
+                run_pvpython(*t)
+    finally:
+        os.remove(script_path)
+        
+    print("\nBatch rendering complete!")
+
+if __name__ == "__main__":
+    main()
