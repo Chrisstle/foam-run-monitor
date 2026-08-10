@@ -9,6 +9,12 @@ if [[ "$quiet" == false ]]; then clear; fi
 
 mode=""
 customNP=""
+quiet=false
+isBatch=false
+batchJobs=1
+batchCases=()
+originalArgs=()
+
 while [[ "$#" -gt 0 ]]
 do
     case $1 in
@@ -23,13 +29,17 @@ do
             echo ""
             echo "Options:"
             echo "  -np <number>        Overrides numberOfSubdomains to use <number> processors."
+            echo "  -q,  --quiet        Suppresses interactive terminal output."
+            echo "  -b,  --batch        Batch mode. Any positional arguments after this are treated as case directories."
+            echo "  -P,  --jobs <num>   Number of parallel jobs for batch processing (default 1)."
             echo "  -h,  --help         Show this help message and exit."
             exit 0
             ;;
-        -n|--new) mode="new" ;;
-        -c|--continue) mode="continue" ;;
-        -r|--reconstruct) mode="reconstruct" ;;
-        -clean) mode="clean" ;;
+        -n|--new) mode="new"; originalArgs+=("$1") ;;
+        -c|--continue) mode="continue"; originalArgs+=("$1") ;;
+        -r|--reconstruct) mode="reconstruct"; originalArgs+=("$1") ;;
+        -clean) mode="clean"; originalArgs+=("$1") ;;
+        -q|--quiet) quiet=true; originalArgs+=("$1") ;;
         -np) 
             if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]
             then
@@ -37,7 +47,26 @@ do
                 exit 1
             fi
             customNP="$2"
+            originalArgs+=("$1" "$2")
             shift
+            ;;
+        -P|--jobs)
+            if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]
+            then
+                echo "[ERROR] -P requires a positive integer argument."
+                exit 1
+            fi
+            batchJobs="$2"
+            shift
+            ;;
+        -b|--batch)
+            isBatch=true
+            shift
+            while [[ "$#" -gt 0 ]]; do
+                batchCases+=("$1")
+                shift
+            done
+            break
             ;;
         *) echo "[ERROR] Unknown parameter passed: $1"; exit 1 ;;
     esac
