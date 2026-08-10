@@ -14,6 +14,7 @@ A collection of robust utility scripts designed to streamline the execution and 
 - **Active Monitoring**: Active monitoring of the case, similar in style as `foamProgress` (see examples below).
 - **Automated Reconstruction**: Automatically handles `reconstructParMesh` (if a dynamic mesh is used) followed by `reconstructPar` at the end of a parallel run, cleaning up processor directories upon success.
 - **Failsafe Mechanisms**: Gracefully intercepts `Ctrl+C` to cleanly kill background solvers. Skips cleanup if reconstruction encounters errors, preserving your `processor*` directories.
+- **Batch Processing & Job Pool**: Run multiple case directories sequentially or in parallel (`-P`). Features a native, live-updating TUI dashboard that tracks the status of all queued and active jobs.
 
 ### Usage
 ```bash
@@ -34,8 +35,25 @@ You must specify exactly one of the following modes to run the script:
 #### Options (Optional)
 | Flag | Description |
 | :--- | :--- |
-| `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. |
+| `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. If used with `--batch`, it updates the dictionary for *all* target cases before starting. |
+| `-b, --batch` | Batch execution mode. Treats all trailing positional arguments (e.g. `case*`) as directories to execute. |
+| `-P, --jobs <num>`| Number of concurrent jobs to run in batch mode (default: 1). |
+| `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
 | `-h, --help` | Show the help message and exit. |
+
+### Examples
+
+**Single Case:**
+```bash
+runCase -n -np 4
+```
+
+**Batch Processing:**
+Run a new simulation for all cases matching `case*`, running 2 cases concurrently:
+```bash
+runCase -n -P 2 -b case*
+```
+*Note: In batch mode, a live dashboard will appear to track the status (Queued, Running, Done, Crashed) of each case.*
 
 
 ## Under the Hood
