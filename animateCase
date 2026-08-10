@@ -17,6 +17,7 @@ DEFAULT_FPS = 15
 DEFAULT_RESOLUTION = [1280, 720]
 DEFAULT_FIELD = 'alpha.water'
 DEFAULT_FORMAT = '.avi'
+# =============================================================================
 def find_pvpython():
     pv_path = shutil.which('pvpython')
     if pv_path:
@@ -41,7 +42,6 @@ def find_pvpython():
     return None
 
 PVPYTHON = find_pvpython()
-# =============================================================================
 
 def find_openfoam_reader_name(state_file):
     try:
