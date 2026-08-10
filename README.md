@@ -37,6 +37,23 @@ You must specify exactly one of the following modes to run the script:
 | `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. |
 | `-h, --help` | Show the help message and exit. |
 
+
+## Under the Hood
+
+### Logs
+`runCase` quietly redirects all standard OpenFOAM® outputs into a generated `log/` directory. You can inspect these if something goes wrong:
+- `log/log.checkMesh`
+- `log/log.decomposePar`
+- `log/log.run` (The main solver output)
+- `log/log.reconstructParMesh`
+- `log/log.reconstructPar`
+
+### Dynamic Mesh Handling
+If `dynamicFvMesh` (e.g., Adaptive Mesh Refinement) is detected in `constant/dynamicMeshDict`:
+1. `foamProgress` and `runCase` will dynamically display current cell counts by parsing the solver output.
+2. During reconstruction, `runCase` automatically executes `reconstructParMesh`
+before `reconstructPar`.
+
 ---
 
 ## 2. foamProgress
@@ -68,24 +85,6 @@ foamProgress [OPTIONS]
 
 **Full Monitoring Dashboard (`-f`):**
 ![foamProgress full](Images/foamProgress%20full.png)
-
----
-
-## Under the Hood
-
-### Logs
-`runCase` quietly redirects all standard OpenFOAM® outputs into a generated `log/` directory. You can inspect these if something goes wrong:
-- `log/log.checkMesh`
-- `log/log.decomposePar`
-- `log/log.run` (The main solver output)
-- `log/log.reconstructParMesh`
-- `log/log.reconstructPar`
-
-### Dynamic Mesh Handling
-If `dynamicFvMesh` (e.g., Adaptive Mesh Refinement) is detected in `constant/dynamicMeshDict`:
-1. `foamProgress` and `runCase` will dynamically display current cell counts by parsing the solver output.
-2. During reconstruction, `runCase` automatically executes `reconstructParMesh`
-before `reconstructPar`.
 
 ---
 
