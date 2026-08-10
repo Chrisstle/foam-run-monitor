@@ -441,6 +441,7 @@ else
     while kill -0 "$solver_pid" 2>/dev/null
     do
         sleep 5
+        if [[ "$quiet" == true ]]; then continue; fi
         
         # Check latest saved time step depending on execution mode
         if [[ "$runParallel" == true ]]
@@ -636,6 +637,8 @@ then
         while kill -0 "$reconstruct_pid" 2>/dev/null
         do
             sleep 1
+            if [[ "$quiet" == true ]]; then continue; fi
+            
             reconstructedTimesList=$(grep "^Time = " log/log.reconstructPar | awk '{print $3}')
             reconstructedCount=$(echo "$reconstructedTimesList" | grep -ve '^$' | wc -l)
             lastReconstructedTime=$(echo "$reconstructedTimesList" | tail -n 1)
