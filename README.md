@@ -39,6 +39,7 @@ You must specify exactly one of the following modes to run the script:
 | `-b, --batch` | Batch execution mode. Treats all trailing positional arguments (e.g. `case*`) as directories to execute. |
 | `-P, --jobs <num>`| Number of concurrent jobs to run in batch mode (default: 1). |
 | `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
+| `-a, --animate` | Triggers `animateCase` automatically when the simulation completes (or collectively at the end of a batch). |
 | `-h, --help` | Show the help message and exit. |
 
 ### Examples

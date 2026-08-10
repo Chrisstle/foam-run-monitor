@@ -14,6 +14,7 @@ isBatch=false
 batchJobs=1
 batchCases=()
 originalArgs=()
+animate=false
 
 while [[ "$#" -gt 0 ]]
 do
@@ -30,6 +31,7 @@ do
             echo "Options:"
             echo "  -np <number>        Overrides numberOfSubdomains to use <number> processors."
             echo "  -q,  --quiet        Suppresses interactive terminal output."
+            echo "  -a,  --animate      Runs animateCase automatically when finished."
             echo "  -b,  --batch        Batch mode. Any positional arguments after this are treated as case directories."
             echo "  -P,  --jobs <num>   Number of parallel jobs for batch processing (default 1)."
             echo "  -h,  --help         Show this help message and exit."
@@ -40,6 +42,7 @@ do
         -r|--reconstruct) mode="reconstruct"; originalArgs+=("$1") ;;
         -clean) mode="clean"; originalArgs+=("$1") ;;
         -q|--quiet) quiet=true; originalArgs+=("$1") ;;
+        -a|--animate) animate=true ;;
         -np) 
             if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]
             then
@@ -198,6 +201,25 @@ if [[ "$isBatch" == true ]]; then
     echo "================================================================================"
     echo " Batch Execution Complete!"
     echo "================================================================================"
+    
+    if [[ "$animate" == true ]]; then
+        echo ""
+        echo "[RUN]   Rendering animations for all batch cases..."
+        
+        if [[ ${#validCases[@]} -gt 0 ]]; then
+            animateCase -P "$batchJobs" "${validCases[@]}"
+            
+            # Rename crashed cases
+            for i in "${!validCases[@]}"; do
+                if [[ "${states[$i]}" == 3 ]]; then
+                    c_name=$(basename "${validCases[$i]}")
+                    if [[ -f "Animations/${c_name}.avi" ]]; then
+                        mv "Animations/${c_name}.avi" "Animations/${c_name}_Crashed.avi"
+                    fi
+                fi
+            done
+        fi
+    fi
     exit 0
 fi
 
@@ -729,6 +751,16 @@ then
 fi
 
 echo "[DONE]  Simulation complete in $(pwd)"
+
+if [[ "$animate" == true && "$isBatch" == false ]]; then
+    echo ""
+    if [[ "$quiet" == false ]]; then
+        printf "[RUN]   %-40s\n" "Rendering animation"
+        animateCase
+    else
+        animateCase > log/log.animateCase 2>&1
+    fi
+fi
 
 # Horizontal Divider
 cols=$(tput cols)
