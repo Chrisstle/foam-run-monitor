@@ -10,6 +10,7 @@ if [[ "$quiet" == false ]]; then clear; fi
 mode=""
 customNP=""
 quiet=false
+forceNew=false
 isBatch=false
 batchJobs=1
 batchCases=()
@@ -41,6 +42,7 @@ do
             exit 0
             ;;
         -n|--new) mode="new"; originalArgs+=("$1") ;;
+        --force-new) mode="new"; forceNew=true; originalArgs+=("$1") ;;
         -c|--continue) mode="continue"; originalArgs+=("$1") ;;
         -r|--reconstruct) mode="reconstruct"; originalArgs+=("$1") ;;
         -clean) mode="clean"; originalArgs+=("$1") ;;
@@ -131,6 +133,41 @@ if [[ "$isBatch" == true ]]; then
                 echo "[WARN]  $dict not found in $(basename "$c")"
             fi
         done
+    fi
+    
+    if [[ "$mode" == "new" ]]; then
+        casesWithData=()
+        for c in "${validCases[@]}"; do
+            hasData=0
+            if ls -d "$c"/processor* >/dev/null 2>&1; then hasData=1; fi
+            if find "$c" -maxdepth 1 -type d -name "[0-9]*" | grep -vE '/0$' | grep -qE '/[0-9]+(\.[0-9]+)?$'; then 
+                hasData=1
+            fi
+            if [[ "$hasData" -eq 1 ]]; then
+                casesWithData+=("$(basename "$c")")
+            fi
+        done
+        
+        if [[ ${#casesWithData[@]} -gt 0 ]]; then
+            echo ""
+            echo "[WARN]  Existing simulation data detected in the following cases:"
+            for cwd in "${casesWithData[@]}"; do
+                echo "          - $cwd"
+            done
+            read -r -p "        Delete data and restart these simulations? [y/N]: " reply
+            if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]; then
+                echo "[ABORT] Batch execution cancelled."
+                exit 1
+            fi
+            
+            # Since user approved, we replace -n/--new with --force-new in originalArgs
+            # so the background workers bypass the individual prompt.
+            for i in "${!originalArgs[@]}"; do
+                if [[ "${originalArgs[$i]}" == "-n" || "${originalArgs[$i]}" == "--new" ]]; then
+                    originalArgs[$i]="--force-new"
+                fi
+            done
+        fi
     fi
     
     echo ""
@@ -424,7 +461,7 @@ else
 
     if [[ "$mode" == "new" ]]
     then
-        if [[ "$hasData" -eq 1 ]]
+        if [[ "$hasData" -eq 1 ]] && [[ "$forceNew" == false ]]
         then
             echo ""
             printf "[WARN]  %-25s\n" "Existing simulation data detected."
