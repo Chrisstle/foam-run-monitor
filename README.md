@@ -36,8 +36,8 @@ You must specify exactly one of the following modes to run the script:
 | Flag | Description |
 | :--- | :--- |
 | `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. If used with `--batch`, it updates the dictionary for *all* target cases before starting. |
-| `-b, --batch` | Batch execution mode. Treats all trailing positional arguments (e.g. `case*`) as directories to execute. If a directory is a parametric study root (not a case itself), it will recursively scan and find all valid nested case directories. If no arguments are provided, it defaults to scanning the current directory. |
-| `-P, --jobs <num>`| Number of concurrent jobs to run in batch mode (default: 1). |
+| `-b, --batch` | Explicitly enables batch mode. If a directory is a parametric study root (not a case itself), it will recursively scan and find all valid nested case directories. If no arguments are provided, it defaults to scanning the current directory. *(Note: Batch mode is automatically enabled if you use the `-P` flag or run the script in a non-case directory)* |
+| `-P, --jobs <num>`| Number of concurrent jobs to run. Automatically enables batch execution mode (default: 1). |
 | `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
 | `-a, --animate` | Triggers `animateCase` automatically when the simulation completes (or collectively at the end of a batch). |
 | `-s, --fps, --res, --field` | Optional flags to pass directly to `animateCase` when using `-a`. (e.g. `--fps 5 -s custom.pvsm`) |
@@ -53,18 +53,18 @@ runCase -n -np 4
 **Batch Processing:**
 Run a new simulation for all cases matching `case*`, running 2 cases concurrently:
 ```bash
-runCase -n -P 2 -b case*
+runCase -n -P 2 case*
 ```
 You can also explicitly list out the cases you want to run:
 ```bash
-runCase -n -P 2 -b case1 case3 case4
+runCase -n -P 2 case1 case3 case4
 ```
 *Note: In batch mode, a live dashboard will appear to track the status (Queued, Running, Done, Crashed) of each case.*
 
 **Comprehensive Pipeline:**
-Clean the directory, decompose for 3 cores, run 2 jobs in parallel over all cases, and render customized animations at the end:
+Clean the directory, decompose for 3 cores, run 2 jobs in parallel over all nested cases in the current directory, and render customized animations at the end:
 ```bash
-runCase --new -np 3 --jobs 2 --batch case* --animate --fps 5 --state set_up.pvsm
+runCase --new -np 3 -P 2 --animate --fps 5 --state set_up.pvsm
 ```
 
 ## Under the Hood
