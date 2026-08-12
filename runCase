@@ -98,14 +98,39 @@ if [[ "$isBatch" == true ]]; then
     echo " runCase Batch Manager"
     echo "================================================================================"
     
+    if [[ ${#batchCases[@]} -eq 0 ]]; then
+        batchCases=(".")
+    fi
+
     validCases=()
     for c in "${batchCases[@]}"; do
         if [[ -d "$c" ]]; then
-            validCases+=("$(realpath "$c")")
+            if [[ -f "$c/system/controlDict" ]]; then
+                validCases+=("$(realpath "$c")")
+            else
+                echo "[INFO]  Searching for cases inside '$c'..."
+                while IFS= read -r foundCase; do
+                    if [[ -n "$foundCase" ]]; then
+                        validCases+=("$foundCase")
+                    fi
+                done < <(python3 -c "import os, sys; [print(os.path.abspath(r)) for r, d, f in os.walk(sys.argv[1]) if 'system' in d and os.path.isfile(os.path.join(r, 'system', 'controlDict')) and not d.clear()]" "$c" 2>/dev/null)
+            fi
         else
             echo "[WARN]  Skipping '$c' (not a directory)"
         fi
     done
+
+    # Remove duplicates and sort naturally by basename
+    if [[ ${#validCases[@]} -gt 0 ]]; then
+        # Remove exact duplicates first
+        mapfile -t validCases < <(printf "%s\n" "${validCases[@]}" | sort -u)
+        # Then sort naturally by basename
+        mapfile -t validCases < <(
+            for c in "${validCases[@]}"; do
+                echo "$(basename "$c")|$c"
+            done | sort -t '|' -k 1,1 -V | cut -d '|' -f 2-
+        )
+    fi
     
     if [[ ${#validCases[@]} -eq 0 ]]; then
         echo "[ERROR] No valid case directories provided for batch execution."
@@ -170,6 +195,11 @@ if [[ "$isBatch" == true ]]; then
         fi
     fi
     
+    echo ""
+    echo "[INFO]  Cases to execute:"
+    for c in "${validCases[@]}"; do
+        echo "          - $(basename "$c")"
+    done
     echo ""
     read -r -p "Proceed with batch execution? [y/N]: " reply
     if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]; then

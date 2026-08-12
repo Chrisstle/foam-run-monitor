@@ -8,6 +8,7 @@ import shutil
 import glob
 import tempfile
 import xml.etree.ElementTree as ET
+import re
 from concurrent.futures import ProcessPoolExecutor
 
 # =============================================================================
@@ -177,12 +178,28 @@ def main():
     args = parser.parse_args()
     
     # Determine cases
-    cases = [os.path.abspath(c) for c in args.cases if os.path.isdir(c)]
+    input_cases = args.cases if args.cases else [os.getcwd()]
+    
+    cases = []
+    for c in input_cases:
+        if os.path.isdir(c):
+            if os.path.isfile(os.path.join(c, "system", "controlDict")):
+                cases.append(os.path.abspath(c))
+            else:
+                print(f"Searching for cases inside '{c}'...")
+                for root, dirs, files in os.walk(c):
+                    if "system" in dirs and os.path.isfile(os.path.join(root, "system", "controlDict")):
+                        cases.append(os.path.abspath(root))
+                        dirs.clear() # Stop searching deeper inside this case folder
+                        
+    # Remove duplicates and sort naturally by basename
+    def natural_sort_key(s):
+        return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', os.path.basename(s))]
+    cases = sorted(list(set(cases)), key=natural_sort_key)
     
     if not cases:
-        # Default to single case mode in current directory
-        cases = [os.getcwd()]
-        print(f"No cases provided. Defaulting to current directory: {cases[0]}")
+        print("No valid OpenFOAM cases found.")
+        sys.exit(1)
     
     # Check ParaView executable
     if not PVPYTHON or not os.path.exists(PVPYTHON):

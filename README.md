@@ -36,7 +36,7 @@ You must specify exactly one of the following modes to run the script:
 | Flag | Description |
 | :--- | :--- |
 | `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. If used with `--batch`, it updates the dictionary for *all* target cases before starting. |
-| `-b, --batch` | Batch execution mode. Treats all trailing positional arguments (e.g. `case*`) as directories to execute. |
+| `-b, --batch` | Batch execution mode. Treats all trailing positional arguments (e.g. `case*`) as directories to execute. If a directory is a parametric study root (not a case itself), it will recursively scan and find all valid nested case directories. If no arguments are provided, it defaults to scanning the current directory. |
 | `-P, --jobs <num>`| Number of concurrent jobs to run in batch mode (default: 1). |
 | `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
 | `-a, --animate` | Triggers `animateCase` automatically when the simulation completes (or collectively at the end of a batch). |
@@ -124,7 +124,7 @@ foamProgress [OPTIONS]
 ### Features
 - **Intelligent State File Parsing:** Supports ParaView state files (`.pvsm`). It automatically reads the XML to find the registered name of the OpenFOAM reader proxy and swaps the file paths for each new case seamlessly.
 - **Automated Directory Handling:** Creates `.foam` dummy files automatically.
-- **Batch Processing with Wildcards:** Takes a list of OpenFOAM case directories using shell expansion (e.g. `animateCase case*`).
+- **Batch Processing with Wildcards:** Takes a list of OpenFOAM case directories using shell expansion (e.g. `animateCase case*`). It also supports recursive case discovery if you provide a root directory or no arguments at all!
 - **Parallel Processing:** Use the `-P` flag to spawn multiple `pvpython` subprocesses and render multiple videos concurrently.
 - **Smart Output Targeting:** Renders directly into the case directory for single cases, and generates an `Animations` folder to group the outputs for batch rendering.
 
