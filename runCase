@@ -69,22 +69,28 @@ do
                 exit 1
             fi
             batchJobs="$2"
+            isBatch=true
             shift
             ;;
         -b|--batch)
             isBatch=true
-            shift
-            while [[ "$#" -gt 0 ]]; do
-                batchCases+=("$1")
-                shift
-            done
-            break
             ;;
-        *) echo "[ERROR] Unknown parameter passed: $1"; exit 1 ;;
+        *)
+            if [[ "$1" != -* ]]; then
+                batchCases+=("$1")
+                isBatch=true
+            else
+                echo "[ERROR] Unknown parameter passed: $1"
+                exit 1
+            fi
+            ;;
     esac
     shift
 done
 
+if [[ ${#batchCases[@]} -eq 0 && ! -f "system/controlDict" ]]; then
+    isBatch=true
+fi
 
 if [[ -z "$mode" && "$isBatch" == false ]]
 then
