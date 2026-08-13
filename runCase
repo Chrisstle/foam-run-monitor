@@ -216,15 +216,31 @@ if [[ "$isBatch" == true ]]; then
     
     states=()
     pids=()
-    for ((i=0; i<${#validCases[@]}; i++)); do states[$i]=0; pids[$i]=""; done
+    endTimes=()
+    case_progress=()
+    for ((i=0; i<${#validCases[@]}; i++)); do 
+        states[$i]=0
+        pids[$i]=""
+        c_dir="${validCases[$i]}"
+        et=$(grep "^[[:space:]]*endTime" "$c_dir/system/controlDict" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+        endTimes[$i]="$et"
+        case_progress[$i]=""
+    done
     
     running_jobs=0
     next_job=0
-    spin_chars="/-\|"
+    spin_chars=("/" "—" "\\" "|")
     spin_idx=0
-    lines_to_clear=${#validCases[@]}
+    loop_tick=0
+    lines_to_clear=$(( ${#validCases[@]} + 1 ))
     
-    for ((i=0; i<$lines_to_clear; i++)); do echo ""; done
+    for ((i=1; i<$lines_to_clear; i++)); do echo ""; done
+    
+    # Disable terminal echo to prevent keyboard input from breaking the UI layout
+    # Also hide the cursor for better aesthetics
+    trap 'stty echo 2>/dev/null; echo -en "\033[?25h"; echo -e "\n[ABORT] Batch execution interrupted."; kill $(jobs -p) 2>/dev/null; exit 1' INT TERM
+    stty -echo 2>/dev/null
+    echo -en "\033[?25l"
     
     while true; do
         for i in "${!validCases[@]}"; do
@@ -236,6 +252,22 @@ if [[ "$isBatch" == true ]]; then
                         states[$i]=2
                     else
                         states[$i]=3
+                        c_dir="${validCases[$i]}"
+                        if [[ -f "$c_dir/log/log.run" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
+                            prog=$(tail -n 500 "$c_dir/log/log.run" 2>/dev/null | awk -v end="${endTimes[$i]}" '
+                                /^Time = /{t=$3}
+                                END {
+                                    if(t != "" && end > 0) {
+                                        p=(t/end)*100;
+                                        if(p>100) p=100;
+                                        if(p<0) p=0;
+                                        printf "%.1f", p
+                                    }
+                                }')
+                            if [[ -n "$prog" ]]; then
+                                case_progress[$i]=" ($prog%)"
+                            fi
+                        fi
                     fi
                     ((running_jobs--))
                 fi
@@ -255,17 +287,43 @@ if [[ "$isBatch" == true ]]; then
             ((next_job++))
         done
         
-        spin_char="${spin_chars:$spin_idx:1}"
+        spin_char="${spin_chars[$spin_idx]}"
         spin_idx=$(( (spin_idx + 1) % 4 ))
         
-        echo -en "\033[${lines_to_clear}A"
+        echo -en "\r"
+        if [[ $lines_to_clear -gt 1 ]]; then
+            echo -en "\033[$((lines_to_clear - 1))A"
+        fi
         
         for i in "${!validCases[@]}"; do
             c_name=$(basename "${validCases[$i]}")
+            c_dir="${validCases[$i]}"
+            
+            if [[ "${states[$i]}" == 1 ]]; then
+                if [[ $((loop_tick % 4)) -eq 0 ]]; then
+                    if [[ -f "$c_dir/log/log.run" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
+                        prog=$(tail -n 500 "$c_dir/log/log.run" 2>/dev/null | awk -v end="${endTimes[$i]}" '
+                            /^Time = /{t=$3}
+                            END {
+                                if(t != "" && end > 0) {
+                                    p=(t/end)*100;
+                                    if(p>100) p=100;
+                                    if(p<0) p=0;
+                                    printf "%.1f", p
+                                }
+                            }')
+                        if [[ -n "$prog" ]]; then
+                            case_progress[$i]=" ($prog%)"
+                        fi
+                    fi
+                fi
+            fi
+
             if [[ "${states[$i]}" == 0 ]]; then status_text="Queued"; fi
-            if [[ "${states[$i]}" == 1 ]]; then status_text="[$spin_char] Running"; fi
+            if [[ "${states[$i]}" == 1 ]]; then status_text="[$spin_char] Running${case_progress[$i]}"; fi
             if [[ "${states[$i]}" == 2 ]]; then status_text="Done"; fi
-            if [[ "${states[$i]}" == 3 ]]; then status_text="Crashed"; fi
+            if [[ "${states[$i]}" == 3 ]]; then status_text="Crashed${case_progress[$i]}"; fi
+            
             printf "\033[2K%-40s : %s\n" "$c_name" "$status_text"
         done
         
@@ -274,8 +332,14 @@ if [[ "$isBatch" == true ]]; then
             if [[ "$st" -lt 2 ]]; then all_done=false; break; fi
         done
         if [[ "$all_done" == true ]]; then break; fi
+        
+        ((loop_tick++))
         sleep 0.5
     done
+    
+    stty echo 2>/dev/null
+    echo -en "\033[?25h"
+    trap - INT TERM
     
     echo ""
     echo "================================================================================"
