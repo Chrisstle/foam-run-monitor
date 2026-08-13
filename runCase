@@ -117,7 +117,7 @@ if [[ "$isBatch" == true ]]; then
                     if [[ -n "$foundCase" ]]; then
                         validCases+=("$foundCase")
                     fi
-                done < <(python3 -c "import os, sys; [print(os.path.abspath(r)) for r, d, f in os.walk(sys.argv[1]) if 'system' in d and os.path.isfile(os.path.join(r, 'system', 'controlDict')) and not d.clear()]" "$c" 2>/dev/null)
+                done < <(python3 -c "import os,sys; b=os.path.abspath(sys.argv[1]); [d.clear() if r[len(b):].count(os.sep)>=3 else (print(r) or d.clear()) if 'system' in d and os.path.isfile(os.path.join(r,'system','controlDict')) else None for r,d,f in os.walk(b)]" "$c" 2>/dev/null)
             fi
         else
             echo "[WARN]  Skipping '$c' (not a directory)"
