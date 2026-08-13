@@ -72,9 +72,7 @@ do
             isBatch=true
             shift
             ;;
-        -b|--batch)
-            isBatch=true
-            ;;
+
         *)
             if [[ "$1" != -* ]]; then
                 batchCases+=("$1")

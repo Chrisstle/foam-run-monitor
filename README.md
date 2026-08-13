@@ -35,9 +35,8 @@ You must specify exactly one of the following modes to run the script:
 #### Options (Optional)
 | Flag | Description |
 | :--- | :--- |
-| `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. If used with `--batch`, it updates the dictionary for *all* target cases before starting. |
-| `-b, --batch` | Explicitly enables batch mode. If a directory is a parametric study root (not a case itself), it will recursively scan and find all valid nested case directories. If no arguments are provided, it defaults to scanning the current directory. *(Note: Batch mode is automatically enabled if you use the `-P` flag or run the script in a non-case directory)* |
-| `-P, --jobs <num>`| Number of concurrent jobs to run. Automatically enables batch execution mode (default: 1). |
+| `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. If running in batch mode, it updates the dictionary for *all* target cases before starting. |
+| `-P, --jobs <num>`| Number of concurrent jobs to run. Automatically enables batch execution mode (default: 1). **Note on Batch Mode:** Batch execution and recursive scanning are automatically triggered if you pass multiple positional arguments or if you run the script in a directory without a `system/controlDict` (e.g., a parametric study root). |
 | `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
 | `-a, --animate` | Triggers `animateCase` automatically when the simulation completes (or collectively at the end of a batch). |
 | `-s, --fps, --res, --field` | Optional flags to pass directly to `animateCase` when using `-a`. (e.g. `--fps 5 -s custom.pvsm`) |
