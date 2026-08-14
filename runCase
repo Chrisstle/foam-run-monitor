@@ -36,8 +36,8 @@ do
             echo "  -a,  --animate      Runs animateCase automatically when finished."
             echo "                      Optional animation flags: -s|--state <file>, --fps <num>,"
             echo "                                                --res <w> <h>, --field <name>"
-            echo "  -b,  --batch        Batch mode. Any positional arguments after this are treated as case directories."
-            echo "  -P,  --jobs <num>   Number of parallel jobs for batch processing (default 1)."
+            echo "  -b,  --batch        Explicitly enables batch mode. Recursively scans for nested cases."
+            echo "  -P,  --jobs <num>   Number of concurrent jobs. Automatically enables batch mode."
             echo "  -h,  --help         Show this help message and exit."
             exit 0
             ;;
@@ -254,8 +254,20 @@ if [[ "$isBatch" == true ]]; then
                     else
                         states[$i]=3
                         c_dir="${validCases[$i]}"
-                        if [[ -f "$c_dir/log/log.run" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
-                            prog=$(tail -n 500 "$c_dir/log/log.run" 2>/dev/null | awk -v end="${endTimes[$i]}" '
+                        local_log="$c_dir/log/log.run"
+                        if [[ -f "$c_dir/log/log.reconstructParMesh" && "$c_dir/log/log.reconstructParMesh" -nt "$c_dir/log/log.run" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
+                            local_log="$c_dir/log/log.reconstructParMesh"
+                        elif [[ -f "$c_dir/log/log.reconstructPar" && "$c_dir/log/log.reconstructPar" -nt "$c_dir/log/log.run" ]]; then
+                            local_log="$c_dir/log/log.reconstructPar"
+                        elif [[ "$mode" == "reconstruct" ]]; then
+                            if [[ -f "$c_dir/log/log.reconstructParMesh" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
+                                local_log="$c_dir/log/log.reconstructParMesh"
+                            else
+                                local_log="$c_dir/log/log.reconstructPar"
+                            fi
+                        fi
+                        if [[ -f "$local_log" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
+                            prog=$(tail -n 500 "$local_log" 2>/dev/null | awk -v end="${endTimes[$i]}" '
                                 /^Time = /{t=$3}
                                 END {
                                     if(t != "" && end > 0) {
@@ -303,8 +315,20 @@ if [[ "$isBatch" == true ]]; then
                 
                 if [[ "${states[$i]}" == 1 ]]; then
                     if [[ $((loop_tick % 4)) -eq 0 ]]; then
-                        if [[ -f "$c_dir/log/log.run" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
-                            prog=$(tail -n 500 "$c_dir/log/log.run" 2>/dev/null | awk -v end="${endTimes[$i]}" '
+                        local_log="$c_dir/log/log.run"
+                        if [[ -f "$c_dir/log/log.reconstructParMesh" && "$c_dir/log/log.reconstructParMesh" -nt "$c_dir/log/log.run" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
+                            local_log="$c_dir/log/log.reconstructParMesh"
+                        elif [[ -f "$c_dir/log/log.reconstructPar" && "$c_dir/log/log.reconstructPar" -nt "$c_dir/log/log.run" ]]; then
+                            local_log="$c_dir/log/log.reconstructPar"
+                        elif [[ "$mode" == "reconstruct" ]]; then
+                            if [[ -f "$c_dir/log/log.reconstructParMesh" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
+                                local_log="$c_dir/log/log.reconstructParMesh"
+                            else
+                                local_log="$c_dir/log/log.reconstructPar"
+                            fi
+                        fi
+                        if [[ -f "$local_log" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
+                            prog=$(tail -n 500 "$local_log" 2>/dev/null | awk -v end="${endTimes[$i]}" '
                                 /^Time = /{t=$3}
                                 END {
                                     if(t != "" && end > 0) {
@@ -322,7 +346,20 @@ if [[ "$isBatch" == true ]]; then
                 fi
     
                 if [[ "${states[$i]}" == 0 ]]; then status_text="Queued"; fi
-                if [[ "${states[$i]}" == 1 ]]; then status_text="[$spin_char] Running${case_progress[$i]}"; fi
+                if [[ "${states[$i]}" == 1 ]]; then
+                    local_stage="Running"
+                    if [[ -f "$c_dir/log/log.reconstructParMesh" && "$c_dir/log/log.reconstructParMesh" -nt "$c_dir/log/log.run" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
+                        local_stage="Reconstructing Mesh"
+                    elif [[ -f "$c_dir/log/log.reconstructPar" && "$c_dir/log/log.reconstructPar" -nt "$c_dir/log/log.run" ]]; then
+                        local_stage="Reconstructing"
+                    elif [[ "$mode" == "reconstruct" ]]; then
+                        local_stage="Reconstructing"
+                        if [[ -f "$c_dir/log/log.reconstructParMesh" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
+                            local_stage="Reconstructing Mesh"
+                        fi
+                    fi
+                    status_text="[$spin_char] ${local_stage}${case_progress[$i]}"
+                fi
                 if [[ "${states[$i]}" == 2 ]]; then status_text="Done"; fi
                 if [[ "${states[$i]}" == 3 ]]; then status_text="Crashed${case_progress[$i]}"; fi
                 
@@ -467,7 +504,7 @@ fi
 
 # --- Mesh Status and Cell Count ---
 mkdir -p log
-if [[ ! -f log/log.checkMesh ]]
+if [[ "$mode" != "reconstruct" && ! -f log/log.checkMesh ]]
 then
     printf "[INIT]  %-25s : Checking Mesh" "Mesh Check"
     checkMesh -constant > log/log.checkMesh 2>&1 &
@@ -501,11 +538,18 @@ then
         meshStatus="Failed"
     fi
     echo -en "\r\033[2K"
-else
+elif [[ -f log/log.checkMesh ]]
+then
     meshStatus=$(grep -iq "Mesh OK" log/log.checkMesh && echo "OK" || echo "Failed")
+else
+    meshStatus="N/A"
 fi
 
-cellCountRaw=$(grep "cells:" log/log.checkMesh | awk '{print $2}')
+if [[ -f log/log.checkMesh ]]; then
+    cellCountRaw=$(grep "cells:" log/log.checkMesh | awk '{print $2}')
+else
+    cellCountRaw="0"
+fi
 if [[ -z "$cellCountRaw" ]]; then cellCountRaw="0"; fi
 cellCount=$(echo "$cellCountRaw" | sed ':a;s/\B[0-9]\{3\}\>/ &/g;ta')
 

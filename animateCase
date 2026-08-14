@@ -168,7 +168,7 @@ def run_pvpython(script_path, case_dir, out_file, fps, res, field):
 
 def main():
     parser = argparse.ArgumentParser(description="Batch render OpenFOAM cases into animations using ParaView.")
-    parser.add_argument("cases", nargs="*", help="List of OpenFOAM case directories")
+    parser.add_argument("cases", nargs="*", help="List of OpenFOAM case directories or root folders to recursively scan")
     parser.add_argument("-s", "--state", help="Path to a ParaView state file (.pvsm)")
     parser.add_argument("-f", "--fps", type=int, default=DEFAULT_FPS, help=f"Frames per second (default: {DEFAULT_FPS})")
     parser.add_argument("--field", default=DEFAULT_FIELD, help=f"Field to color by if no state file is used (default: {DEFAULT_FIELD})")
