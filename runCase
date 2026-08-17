@@ -230,15 +230,15 @@ if [[ "$isBatch" == true ]]; then
     spin_chars=("/" "—" "\\" "|")
     spin_idx=0
     loop_tick=0
-    lines_to_clear=$(( ${#validCases[@]} + 1 ))
     if [[ "$quiet" == false ]]; then
-        for ((i=1; i<$lines_to_clear; i++)); do echo ""; done
+        # Enter alternate screen buffer
+        tput smcup 2>/dev/null || echo -en "\033[?1049h"
         
         # Disable terminal echo to prevent keyboard input from breaking the UI layout
         # Also hide the cursor for better aesthetics
-        trap 'stty echo 2>/dev/null; echo -en "\033[?25h"; echo -e "\n[ABORT] Batch execution interrupted."; kill $(jobs -p) 2>/dev/null; exit 1' INT TERM
+        trap 'stty echo 2>/dev/null; tput rmcup 2>/dev/null || echo -en "\033[?1049l"; echo -en "\033[?25h\033[?7h"; echo -e "\n[ABORT] Batch execution interrupted."; kill $(jobs -p) 2>/dev/null; exit 1' INT TERM
         stty -echo 2>/dev/null
-        echo -en "\033[?25l"
+        echo -en "\033[?25l\033[?7l"
     else
         trap 'echo -e "\n[ABORT] Batch execution interrupted."; kill $(jobs -p) 2>/dev/null; exit 1' INT TERM
     fi
@@ -304,12 +304,27 @@ if [[ "$isBatch" == true ]]; then
         spin_idx=$(( (spin_idx + 1) % 4 ))
         
         if [[ "$quiet" == false ]]; then
-            echo -en "\r"
-            if [[ $lines_to_clear -gt 1 ]]; then
-                echo -en "\033[$((lines_to_clear - 1))A"
-            fi
+            # Move to top-left of alternate screen
+            printf "\\033[H"
+            
+            echo "================================================================================"
+            printf " runCase Batch Manager - Running %d cases (Jobs: %s)\n" "${#validCases[@]}" "$batchJobs"
+            echo "================================================================================"
+            echo ""
+            
+            max_lines=$(tput lines 2>/dev/null || echo 24)
+            max_cases=$(( max_lines - 6 ))
+            if [[ $max_cases -lt 5 ]]; then max_cases=5; fi
+            
+            printed_cases=0
             
             for i in "${!validCases[@]}"; do
+                if [[ $printed_cases -ge $max_cases && ${#validCases[@]} -gt $max_cases ]]; then
+                    printf "\\033[2K... and %d more cases\n" $(( ${#validCases[@]} - printed_cases ))
+                    ((printed_cases++))
+                    break
+                fi
+                
                 c_name=$(basename "${validCases[$i]}")
                 c_dir="${validCases[$i]}"
                 
@@ -363,8 +378,10 @@ if [[ "$isBatch" == true ]]; then
                 if [[ "${states[$i]}" == 2 ]]; then status_text="Done"; fi
                 if [[ "${states[$i]}" == 3 ]]; then status_text="Crashed${case_progress[$i]}"; fi
                 
-                printf "\033[2K%-40s : %s\n" "$c_name" "$status_text"
+                printf "\\033[2K%-40s : %s\n" "$c_name" "$status_text"
+                ((printed_cases++))
             done
+            echo -en "\\033[J" # Clear any leftover lines below
         fi
         
         all_done=true
@@ -379,7 +396,21 @@ if [[ "$isBatch" == true ]]; then
     
     if [[ "$quiet" == false ]]; then
         stty echo 2>/dev/null
-        echo -en "\033[?25h"
+        # Exit alternate screen
+        tput rmcup 2>/dev/null || echo -en "\033[?1049l"
+        echo -en "\033[?25h\033[?7h"
+        
+        echo ""
+        echo "================================================================================"
+        echo " Batch Execution Complete!"
+        echo "================================================================================"
+        for i in "${!validCases[@]}"; do
+            c_name=$(basename "${validCases[$i]}")
+            if [[ "${states[$i]}" == 2 ]]; then status_text="Done"; fi
+            if [[ "${states[$i]}" == 3 ]]; then status_text="Crashed"; fi
+            printf "%-40s : %s\n" "$c_name" "$status_text"
+        done
+        echo ""
     fi
     trap - INT TERM
     
@@ -599,6 +630,12 @@ then
     if [[ "$runParallel" == false ]]
     then
         echo "[INFO]  Case configured for serial execution. No reconstruction required."
+        exit 0
+    fi
+    
+    if ! ls -d processor* >/dev/null 2>&1
+    then
+        echo "[INFO]  No processor directories found. Case is already reconstructed or not decomposed."
         exit 0
     fi
 else
@@ -849,15 +886,31 @@ if [[ "$runParallel" == true ]]
 then
     reconstructSuccess=true
 
+    fileHandlerArg=""
+    if [[ -d "processors${nProcs}" ]] || [[ -n $(find . -maxdepth 1 -type d -name "processors*" -print -quit) ]]; then
+        fileHandlerArg="-fileHandler collated"
+    fi
+
     if [[ "$isDynamicMesh" == true ]]
     then
-        printf "[RUN]   %-40s\n" "Reconstructing dynamic mesh"
-        if ! reconstructParMesh >> log/log.reconstructParMesh 2>&1
-        then
-            reconstructSuccess=false
-            echo ""
-            printf "[ERROR] reconstructParMesh failed. Processor directories preserved.\n"
-            printf "        Please check log/log.reconstructParMesh for details.\n"
+        skipReconstructMesh=false
+        if [[ -f "log/log.reconstructParMesh" && "log/log.reconstructParMesh" -nt "log/log.run" ]]; then
+            if tail -n 5 log/log.reconstructParMesh 2>/dev/null | grep -q "^End"; then
+                skipReconstructMesh=true
+            fi
+        fi
+
+        if [[ "$skipReconstructMesh" == true ]]; then
+            printf "[INFO]  %-40s\n" "Reconstructing dynamic mesh (already completed)"
+        else
+            printf "[RUN]   %-40s\n" "Reconstructing dynamic mesh"
+            if ! reconstructParMesh $fileHandlerArg >> log/log.reconstructParMesh 2>&1
+            then
+                reconstructSuccess=false
+                echo ""
+                printf "[ERROR] reconstructParMesh failed. Processor directories preserved.\n"
+                printf "        Please check log/log.reconstructParMesh for details.\n"
+            fi
         fi
     fi
 
@@ -866,11 +919,11 @@ then
         printf "[RUN]   %-40s\n" "Reconstructing results"
         
         # Get all reconstructed times
-        reconstructTimes=$(foamListTimes -processor 2>/dev/null | grep -ve '^$' | sort -V)
+        reconstructTimes=$(foamListTimes -processor $fileHandlerArg 2>/dev/null | grep -ve '^$' | sort -V)
         totalTimesCount=$(echo "$reconstructTimes" | grep -ve '^$' | wc -l)
         
         # Start reconstructPar in the background
-        reconstructPar > log/log.reconstructPar 2>&1 &
+        reconstructPar $fileHandlerArg > log/log.reconstructPar 2>&1 &
         reconstruct_pid=$!
         
         # Trap SIGINT and SIGTERM to kill reconstructPar if interrupted
