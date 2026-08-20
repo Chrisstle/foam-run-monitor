@@ -11,7 +11,7 @@ A collection of robust utility scripts designed to streamline the execution and 
 ### Features
 - **Smart Initialization**: Automatically reads `controlDict`, `decomposeParDict`, and `dynamicMeshDict` to determine the solver, execution mode (serial/parallel), target end time, and mesh type.
 - **Mesh Validation**: Runs a pre-flight `checkMesh` to ensure mesh validity before starting the solver.
-- **Active Monitoring**: Active monitoring of the case, similar in style as `foamProgress` (see examples below).
+- **Active Monitoring**: Active monitoring of the case, similar in style as `monitorCase` (see examples below).
 - **Automated Reconstruction**: Automatically handles `reconstructParMesh` (if a dynamic mesh is used) followed by `reconstructPar` at the end of a parallel run, cleaning up processor directories upon success.
 - **Failsafe Mechanisms**: Gracefully intercepts `Ctrl+C` to cleanly kill background solvers. Skips cleanup if reconstruction encounters errors, preserving your `processor*` directories.
 - **Batch Processing & Job Pool**: Run multiple case directories sequentially or in parallel (`-P`). Features a native, live-updating TUI dashboard that tracks the status of all queued and active jobs.
@@ -78,15 +78,15 @@ runCase --new -np 3 -P 2 --animate --fps 5 --state set_up.pvsm
 
 ### Dynamic Mesh Handling
 If `dynamicFvMesh` (e.g., Adaptive Mesh Refinement) is detected in `constant/dynamicMeshDict`:
-1. `foamProgress` and `runCase` will dynamically display current cell counts by parsing the solver output.
+1. `monitorCase` and `runCase` will dynamically display current cell counts by parsing the solver output.
 2. During reconstruction, `runCase` automatically executes `reconstructParMesh`
 before `reconstructPar`.
 
 ---
 
-## 2. foamProgress
+## 2. monitorCase
 
-`foamProgress` is a Python-based utility that monitors one or multiple active OpenFOAM® simulations simultaneously from anywhere in your filesystem. 
+`monitorCase` is a Python-based utility that monitors one or multiple active OpenFOAM® simulations simultaneously from anywhere in your filesystem. 
 
 ### Features
 - **Global Monitoring**: Automatically detects all running OpenFOAM® processes on your machine.
@@ -96,7 +96,7 @@ before `reconstructPar`.
 
 ### Usage
 ```bash
-foamProgress [OPTIONS]
+monitorCase [OPTIONS]
 ```
 
 | Flag | Description |
@@ -109,10 +109,10 @@ foamProgress [OPTIONS]
 ### Examples
 
 **Standard Monitoring Dashboard:**
-![foamProgress](Images/foamProgress.png)
+![monitorCase](Images/monitorCase.png)
 
 **Full Monitoring Dashboard (`-f`):**
-![foamProgress full](Images/foamProgress%20full.png)
+![monitorCase full](Images/monitorCase%20full.png)
 
 ---
 

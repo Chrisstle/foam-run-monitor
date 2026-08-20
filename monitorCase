@@ -8,7 +8,7 @@ import argparse
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-# Add any custom solver names or keywords here. By default, foamProgress
+# Add any custom solver names or keywords here. By default, monitorCase
 # will track processes whose names end with 'Foam' or match the exact application 
 # name in controlDict. 
 #
@@ -406,11 +406,13 @@ def build_output(args):
             if mesh_status != "Unknown":
                 out.append(f"[INFO]  {'Mesh Status':<25} : {mesh_status}")
             if cell_count != "Unknown":
-                out.append(f"[INFO]  {'Initial Cell Count':<25} : {cell_count}")
+                cell_label = 'Initial Cell Count' if mesh_type == 'Dynamic (AMR)' else 'Cell Count'
+                out.append(f"[INFO]  {cell_label:<25} : {cell_count}")
                 if nProcs > 1:
                     try:
                         cells_per_proc = int(cell_count.replace(' ', '')) // nProcs
-                        out.append(f"[INFO]  {'Initial Cells per Core':<25} : {cells_per_proc:,}".replace(",", " "))
+                        core_label = 'Initial Cells per Core' if mesh_type == 'Dynamic (AMR)' else 'Cells per Core'
+                        out.append(f"[INFO]  {core_label:<25} : {cells_per_proc:,}".replace(",", " "))
                     except:
                         pass
                     

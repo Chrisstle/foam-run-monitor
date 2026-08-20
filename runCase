@@ -609,10 +609,17 @@ printf "[INFO]  %-25s : %s s\n" "Target endTime" "$endTime"
 printf "[INFO]  %-25s : %s s\n" "Write Interval" "$writeInterval"
 printf "[INFO]  %-25s : %s\n" "Mesh Type" "$meshTypeStr"
 printf "[INFO]  %-25s : %s\n" "Mesh Status" "$meshStatus"
-printf "[INFO]  %-25s : %s\n" "Initial Cell Count" "$cellCount"
+cellLabel="Cell Count"
+coreLabel="Cells per Core"
+if [[ "$isDynamicMesh" == true ]]; then
+    cellLabel="Initial Cell Count"
+    coreLabel="Initial Cells per Core"
+fi
+
+printf "[INFO]  %-25s : %s\n" "$cellLabel" "$cellCount"
 if [[ "$runParallel" == true ]]
 then
-    printf "[INFO]  %-25s : %s\n" "Initial Cells per Core" "$cellsPerProc"
+    printf "[INFO]  %-25s : %s\n" "$coreLabel" "$cellsPerProc"
 fi
 echo ""
 printf "[INFO]  %-25s : %s s\n" "Starting from" "$simStartT"
@@ -735,7 +742,11 @@ else
 
         if [[ "$isDynamicMesh" == true ]]
         then
-            latestCells=$(grep -iE "^[[:space:]]*(number of cells|cells:)" log/log.run 2>/dev/null | tail -n 1 | tr -dc '0-9')
+            latestCells=$(tac log/log.run 2>/dev/null | awk '
+            tolower($0) ~ /^[[:space:]]*(number of cells|cells:)/ { c=$0; gsub(/[^0-9]/, "", c); print c; exit }
+            /cells for refinement out of / { sub(/.*out of /, "", $0); c=$0; gsub(/[^0-9]/, "", c); print c; exit }
+            /(Refined|Unrefined) from .* to / { sub(/.* to /, "", $0); sub(/ cells.*/, "", $0); c=$0; gsub(/[^0-9]/, "", c); print c; exit }
+            ')
             if [[ -n "$latestCells" ]]; then
                 currentCellCountRaw="$latestCells"
             else
@@ -897,6 +908,17 @@ then
         if [[ -f "log/log.reconstructParMesh" && "log/log.reconstructParMesh" -nt "log/log.run" ]]; then
             if tail -n 5 log/log.reconstructParMesh 2>/dev/null | grep -q "^End"; then
                 skipReconstructMesh=true
+                
+                # Verify that addressing files actually exist in the expected format
+                if [[ -n "$fileHandlerArg" ]]; then
+                    if ! find . -maxdepth 5 -path "./processors*/[0-9]*/polyMesh/pointProcAddressing" -print -quit 2>/dev/null | grep -q .; then
+                        skipReconstructMesh=false
+                    fi
+                else
+                    if ! find . -maxdepth 5 -path "./processor*/[0-9]*/polyMesh/pointProcAddressing" -print -quit 2>/dev/null | grep -q .; then
+                        skipReconstructMesh=false
+                    fi
+                fi
             fi
         fi
 
