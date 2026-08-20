@@ -172,10 +172,11 @@ def get_active_log_file(pid, cwd):
 def get_current_time(pid, cwd, log_file):
     if log_file:
         try:
-            with os.popen(f"tail -n 1000 {log_file} | grep '^Time = ' | tail -n 1") as f:
+            with os.popen(f"tail -n 1000 '{log_file}' 2>/dev/null | grep '^Time = ' | tail -n 1") as f:
                 content = f.read()
                 if content:
-                    return float(content.split()[2])
+                    val = content.split()[2].rstrip('s')
+                    return float(val)
         except:
             pass
     return get_current_time_from_dirs(cwd)
@@ -208,14 +209,17 @@ def get_log_metrics(log_file):
         return metrics
     try:
         # Use tail to efficiently grab the end of the file rather than searching from the beginning
-        with os.popen(f"tail -n 1000 {log_file}") as f:
+        with os.popen(f"tail -n 1000 '{log_file}' 2>/dev/null") as f:
             for line in f:
                 if line.startswith('Time = '):
-                    metrics['t'].append(float(line.split()[2]))
+                    val = line.split()[2].rstrip('s')
+                    metrics['t'].append(float(val))
                 elif line.startswith('ExecutionTime = '):
-                    metrics['exec'].append(float(line.split()[2]))
+                    val = line.split()[2].rstrip('s')
+                    metrics['exec'].append(float(val))
                 elif line.startswith('deltaT = '):
-                    metrics['dt'] = float(line.split()[2])
+                    val = line.split()[2].rstrip('s')
+                    metrics['dt'] = float(val)
                 elif 'Courant Number' in line and 'Interface' not in line:
                     parts = line.split()
                     if 'mean:' in parts and 'max:' in parts:
