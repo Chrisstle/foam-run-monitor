@@ -60,6 +60,8 @@ runCase -n -P 2 case1 case3 case4
 ```
 *Note: In batch mode, a live dashboard will appear to track the status (Queued, Running, Done, Crashed) of each case.*
 
+![runCase Batch Dashboard](Images/runCase%20example2.png)
+
 **Comprehensive Pipeline:**
 Clean the directory, decompose for 3 cores, run 2 jobs in parallel over all nested cases in the current directory, and render customized animations at the end:
 ```bash
