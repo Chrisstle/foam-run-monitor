@@ -284,7 +284,8 @@ if [[ "$isBatch" == true ]]; then
             workerArgs=("${originalArgs[@]}")
             if [[ "$quiet" == false ]]; then workerArgs+=("--quiet"); fi
             
-            (cd "$c_dir" && "$0" "${workerArgs[@]}" > batch_worker.log 2>&1) &
+            mkdir -p "$c_dir/log"
+            (cd "$c_dir" && "$0" "${workerArgs[@]}" > log/.batch_worker.log 2>&1) &
             pids[$next_job]=$!
             states[$next_job]=1
             
@@ -346,8 +347,8 @@ if [[ "$isBatch" == true ]]; then
     
                 if [[ "${states[$i]}" == 0 ]]; then status_text="Queued"; fi
                 if [[ "${states[$i]}" == 1 ]]; then
-                    if [[ -f "$c_dir/log/batch_stage" ]]; then
-                        local_stage=$(<"$c_dir/log/batch_stage")
+                    if [[ -f "$c_dir/log/.batch_stage" ]]; then
+                        local_stage=$(<"$c_dir/log/.batch_stage")
                     else
                         local_stage="Running"
                     fi
@@ -516,7 +517,7 @@ mkdir -p log
 if [[ "$mode" != "reconstruct" && ! -f log/log.checkMesh ]]
 then
     printf "[INIT]  %-25s : Checking Mesh" "Mesh Check"
-    echo "Checking Mesh" > log/batch_stage
+    echo "Checking Mesh" > log/.batch_stage
     checkMesh -time 0 > log/log.checkMesh 2>&1 &
     check_pid=$!
     
@@ -664,7 +665,7 @@ else
         if ! ls -d processor* >/dev/null 2>&1
         then
             printf "[RUN]   Decomposing domain"
-            echo "Decomposing" > log/batch_stage
+            echo "Decomposing" > log/.batch_stage
             decomposePar > log/log.decomposePar 2>&1 &
             decomp_pid=$!
             
@@ -693,12 +694,12 @@ else
         fi
 
         printf "[RUN]   Starting %s in parallel (%s cores)\n" "$solver" "$nProcs"
-        echo "Running" > log/batch_stage
+        echo "Running" > log/.batch_stage
         mpirun -np "$nProcs" "$solver" -parallel > log/log.run 2>&1 &
         solver_pid=$!
     else
         printf "[RUN]   Starting %s in serial\n" "$solver"
-        echo "Running" > log/batch_stage
+        echo "Running" > log/.batch_stage
         "$solver" > log/log.run 2>&1 &
         solver_pid=$!
     fi
@@ -908,7 +909,7 @@ then
             printf "[INFO]  %-40s\n" "Reconstructing dynamic mesh (already completed)"
         else
             printf "[RUN]   %-40s\n" "Reconstructing dynamic mesh"
-            echo "Reconstructing Mesh" > log/batch_stage
+            echo "Reconstructing Mesh" > log/.batch_stage
             if ! reconstructParMesh $fileHandlerArg >> log/log.reconstructParMesh 2>&1
             then
                 reconstructSuccess=false
@@ -922,7 +923,7 @@ then
     if [[ "$reconstructSuccess" == true ]]
     then
         printf "[RUN]   %-40s\n" "Reconstructing results"
-        echo "Reconstructing" > log/batch_stage
+        echo "Reconstructing" > log/.batch_stage
         
         # Get all reconstructed times
         reconstructTimes=$(foamListTimes -processor $fileHandlerArg 2>/dev/null | grep -ve '^$' | sort -V)
