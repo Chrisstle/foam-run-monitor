@@ -20,7 +20,7 @@ A collection of robust utility scripts designed to streamline the execution and 
 ```bash
 runCase [MODE] [OPTIONS]
 ```
-Run it from your case directory (the directory where you find system, constant, 0 etc.)
+Run it from your case directory (the directory containing `system`, `constant`, etc.), or from a root directory containing multiple cases to automatically trigger a batch process.
 
 #### Modes (Required)
 You must specify exactly one of the following modes to run the script:
@@ -50,13 +50,15 @@ runCase -n -np 4
 ```
 
 **Batch Processing:**
-Run a new simulation for all cases matching `case*`, running 2 cases concurrently:
-```bash
-runCase -n -P 2 case*
-```
-You can also explicitly list out the cases you want to run:
+If you run `runCase` from a root directory that doesn't have its own `system/controlDict`, it will automatically perform a recursive search (up to 3 directory levels deep) to find and queue all nested case directories.
+
+To manually specify cases, you can pass them as arguments:
 ```bash
 runCase -n -P 2 case1 case3 case4
+```
+Or use wildcards to run all matching directories concurrently:
+```bash
+runCase -n -P 2 case*
 ```
 *Note: In batch mode, a live dashboard will appear to track the status (Queued, Running, Done, Crashed) of each case.*
 

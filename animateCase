@@ -16,7 +16,7 @@ from concurrent.futures import ProcessPoolExecutor
 # =============================================================================
 DEFAULT_FPS = 15
 DEFAULT_RESOLUTION = [1280, 720]
-DEFAULT_FIELD = 'alpha.water'
+DEFAULT_FIELD = 'alpha.*'
 DEFAULT_FORMAT = '.avi'
 # =============================================================================
 def find_pvpython():
@@ -104,14 +104,42 @@ LoadState(state_file, filenames=[{{
 }}])
 renderView = GetActiveViewOrCreate('RenderView')
 renderView.ViewSize = [res_x, res_y]
+try:
+    LoadPalette(paletteName='WhiteBackground')
+except:
+    renderView.Background = [1.0, 1.0, 1.0]
 """
     else:
         script_content += """
 print(f"Loading {foam_file} and coloring by {field}")
 reader = OpenFOAMReader(registrationName=f"{case_name}.foam", FileName=foam_file)
 reader.MeshRegions = ['internalMesh']
+UpdatePipeline(time=0.0, proxy=reader)
+
+# Support wildcard field matching
+import fnmatch
+try:
+    available_fields = list(reader.CellArrays.Available) + list(reader.PointArrays.Available)
+except:
+    available_fields = [] # Fallback for extremely old PV versions
+
+if available_fields:
+    original_field = field
+    if '*' in field or '?' in field:
+        matches = fnmatch.filter(available_fields, field)
+        if not matches:
+            print(f"ERROR: Could not find any field matching wildcard '{field}'. Available fields: {available_fields}")
+            sys.exit(1)
+        field = matches[0]
+        print(f"Wildcard '{original_field}' resolved to field '{field}'")
+    else:
+        if field not in available_fields:
+            print(f"ERROR: Field '{field}' not found in the case. Available fields: {available_fields}")
+            sys.exit(1)
+
 try:
     reader.CellArrays = [field]
+    reader.PointArrays = [field]
 except:
     pass
 
@@ -119,6 +147,10 @@ UpdatePipeline(time=0.0, proxy=reader)
 
 renderView = GetActiveViewOrCreate('RenderView')
 renderView.ViewSize = [res_x, res_y]
+try:
+    LoadPalette(paletteName='WhiteBackground')
+except:
+    renderView.Background = [1.0, 1.0, 1.0]
 
 display = Show(reader, renderView, 'UnstructuredGridRepresentation')
 display.Representation = 'Surface'
@@ -148,6 +180,8 @@ except Exception as e:
 """
     
     script_content += """
+
+
 scene = GetAnimationScene()
 scene.UpdateAnimationUsingDataTimeSteps()
 
@@ -268,7 +302,10 @@ def main():
     finally:
         os.remove(script_path)
         
-    print("\nBatch rendering complete!")
+    if multiple_cases:
+        print("\nBatch rendering complete!")
+    else:
+        print("\nRendering complete!")
 
 if __name__ == "__main__":
     main()
