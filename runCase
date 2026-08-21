@@ -254,18 +254,8 @@ if [[ "$isBatch" == true ]]; then
                     else
                         states[$i]=3
                         c_dir="${validCases[$i]}"
-                        local_log="$c_dir/log/log.run"
-                        if [[ -f "$c_dir/log/log.reconstructParMesh" && "$c_dir/log/log.reconstructParMesh" -nt "$c_dir/log/log.run" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
-                            local_log="$c_dir/log/log.reconstructParMesh"
-                        elif [[ -f "$c_dir/log/log.reconstructPar" && "$c_dir/log/log.reconstructPar" -nt "$c_dir/log/log.run" ]]; then
-                            local_log="$c_dir/log/log.reconstructPar"
-                        elif [[ "$mode" == "reconstruct" ]]; then
-                            if [[ -f "$c_dir/log/log.reconstructParMesh" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
-                                local_log="$c_dir/log/log.reconstructParMesh"
-                            else
-                                local_log="$c_dir/log/log.reconstructPar"
-                            fi
-                        fi
+                        local_log=$(\ls -t "$c_dir"/log/log.* 2>/dev/null | head -n 1)
+                        if [[ -z "$local_log" ]]; then local_log="$c_dir/log/log.run"; fi
                         if [[ -f "$local_log" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
                             prog=$(tail -n 500 "$local_log" 2>/dev/null | awk -v end="${endTimes[$i]}" '
                                 /^Time = /{t=$3}
@@ -279,6 +269,8 @@ if [[ "$isBatch" == true ]]; then
                                 }')
                             if [[ -n "$prog" ]]; then
                                 case_progress[$i]=" ($prog%)"
+                            else
+                                case_progress[$i]=""
                             fi
                         fi
                     fi
@@ -330,18 +322,8 @@ if [[ "$isBatch" == true ]]; then
                 
                 if [[ "${states[$i]}" == 1 ]]; then
                     if [[ $((loop_tick % 4)) -eq 0 ]]; then
-                        local_log="$c_dir/log/log.run"
-                        if [[ -f "$c_dir/log/log.reconstructParMesh" && "$c_dir/log/log.reconstructParMesh" -nt "$c_dir/log/log.run" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
-                            local_log="$c_dir/log/log.reconstructParMesh"
-                        elif [[ -f "$c_dir/log/log.reconstructPar" && "$c_dir/log/log.reconstructPar" -nt "$c_dir/log/log.run" ]]; then
-                            local_log="$c_dir/log/log.reconstructPar"
-                        elif [[ "$mode" == "reconstruct" ]]; then
-                            if [[ -f "$c_dir/log/log.reconstructParMesh" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
-                                local_log="$c_dir/log/log.reconstructParMesh"
-                            else
-                                local_log="$c_dir/log/log.reconstructPar"
-                            fi
-                        fi
+                        local_log=$(\ls -t "$c_dir"/log/log.* 2>/dev/null | head -n 1)
+                        if [[ -z "$local_log" ]]; then local_log="$c_dir/log/log.run"; fi
                         if [[ -f "$local_log" && -n "${endTimes[$i]}" && "${endTimes[$i]}" != "0" ]]; then
                             prog=$(tail -n 500 "$local_log" 2>/dev/null | awk -v end="${endTimes[$i]}" '
                                 /^Time = /{t=$3}
@@ -355,6 +337,8 @@ if [[ "$isBatch" == true ]]; then
                                 }')
                             if [[ -n "$prog" ]]; then
                                 case_progress[$i]=" ($prog%)"
+                            else
+                                case_progress[$i]=""
                             fi
                         fi
                     fi
@@ -362,16 +346,10 @@ if [[ "$isBatch" == true ]]; then
     
                 if [[ "${states[$i]}" == 0 ]]; then status_text="Queued"; fi
                 if [[ "${states[$i]}" == 1 ]]; then
-                    local_stage="Running"
-                    if [[ -f "$c_dir/log/log.reconstructParMesh" && "$c_dir/log/log.reconstructParMesh" -nt "$c_dir/log/log.run" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
-                        local_stage="Reconstructing Mesh"
-                    elif [[ -f "$c_dir/log/log.reconstructPar" && "$c_dir/log/log.reconstructPar" -nt "$c_dir/log/log.run" ]]; then
-                        local_stage="Reconstructing"
-                    elif [[ "$mode" == "reconstruct" ]]; then
-                        local_stage="Reconstructing"
-                        if [[ -f "$c_dir/log/log.reconstructParMesh" && ! -s "$c_dir/log/log.reconstructPar" ]]; then
-                            local_stage="Reconstructing Mesh"
-                        fi
+                    if [[ -f "$c_dir/log/batch_stage" ]]; then
+                        local_stage=$(<"$c_dir/log/batch_stage")
+                    else
+                        local_stage="Running"
                     fi
                     status_text="[$spin_char] ${local_stage}${case_progress[$i]}"
                 fi
@@ -538,7 +516,8 @@ mkdir -p log
 if [[ "$mode" != "reconstruct" && ! -f log/log.checkMesh ]]
 then
     printf "[INIT]  %-25s : Checking Mesh" "Mesh Check"
-    checkMesh -constant > log/log.checkMesh 2>&1 &
+    echo "Checking Mesh" > log/batch_stage
+    checkMesh -time 0 > log/log.checkMesh 2>&1 &
     check_pid=$!
     
     # Trap SIGINT/SIGTERM to kill background checkMesh
@@ -685,6 +664,7 @@ else
         if ! ls -d processor* >/dev/null 2>&1
         then
             printf "[RUN]   Decomposing domain"
+            echo "Decomposing" > log/batch_stage
             decomposePar > log/log.decomposePar 2>&1 &
             decomp_pid=$!
             
@@ -713,10 +693,12 @@ else
         fi
 
         printf "[RUN]   Starting %s in parallel (%s cores)\n" "$solver" "$nProcs"
+        echo "Running" > log/batch_stage
         mpirun -np "$nProcs" "$solver" -parallel > log/log.run 2>&1 &
         solver_pid=$!
     else
         printf "[RUN]   Starting %s in serial\n" "$solver"
+        echo "Running" > log/batch_stage
         "$solver" > log/log.run 2>&1 &
         solver_pid=$!
     fi
@@ -926,6 +908,7 @@ then
             printf "[INFO]  %-40s\n" "Reconstructing dynamic mesh (already completed)"
         else
             printf "[RUN]   %-40s\n" "Reconstructing dynamic mesh"
+            echo "Reconstructing Mesh" > log/batch_stage
             if ! reconstructParMesh $fileHandlerArg >> log/log.reconstructParMesh 2>&1
             then
                 reconstructSuccess=false
@@ -939,6 +922,7 @@ then
     if [[ "$reconstructSuccess" == true ]]
     then
         printf "[RUN]   %-40s\n" "Reconstructing results"
+        echo "Reconstructing" > log/batch_stage
         
         # Get all reconstructed times
         reconstructTimes=$(foamListTimes -processor $fileHandlerArg 2>/dev/null | grep -ve '^$' | sort -V)
