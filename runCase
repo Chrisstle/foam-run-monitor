@@ -577,7 +577,7 @@ else
 fi
 
 if [[ -f log/log.checkMesh ]]; then
-    cellCountRaw=$(grep "cells:" log/log.checkMesh | awk '{print $2}')
+    cellCountRaw=$(grep "cells:" log/log.checkMesh | head -n 1 | awk '{print $2}')
 else
     cellCountRaw="0"
 fi
