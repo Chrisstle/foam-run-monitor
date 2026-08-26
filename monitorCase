@@ -107,7 +107,7 @@ def get_current_time_from_dirs(cwd):
         return max(times)
     return None
 
-def get_active_log_file(pid, cwd):
+def get_active_log_file(pid, cwd, comm=None):
     # 1. Walk up the process tree to find any file descriptor pointing to a valid log
     current_pid = str(pid)
     visited = set()
@@ -121,6 +121,8 @@ def get_active_log_file(pid, cwd):
                         target = os.readlink(os.path.join(fd_dir, fd))
                         # Must be a real file, not a pipe, socket, or terminal
                         if target.startswith('/') and not target.startswith('/dev/') and os.path.isfile(target):
+                            if comm and (comm in ['decomposePar', 'reconstructPar', 'reconstructParMesh'] or comm.endswith('Mesh')):
+                                return target
                             with open(target, 'rb') as f:
                                 f.seek(max(0, os.path.getsize(target) - 8192))
                                 if b'Time =' in f.read():
@@ -158,6 +160,9 @@ def get_active_log_file(pid, cwd):
         candidates.sort(key=lambda x: x[1], reverse=True)
         for fp, _ in candidates:
             try:
+                if comm and (comm in ['decomposePar', 'reconstructPar', 'reconstructParMesh'] or comm.endswith('Mesh')):
+                    if os.path.basename(fp) == f"log.{comm}":
+                        return fp
                 with open(fp, 'rb') as f_obj:
                     f_obj.seek(max(0, os.path.getsize(fp) - 8192))
                     if b'Time =' in f_obj.read():
@@ -313,7 +318,8 @@ def get_openfoam_processes():
             control_dict = os.path.join(cwd, 'system', 'controlDict')
             if os.path.isfile(control_dict):
                 app = get_foam_application(cwd)
-                if app == comm or comm.endswith('Foam') or any(solver in comm for solver in CUSTOM_SOLVERS):
+                is_utility = comm in ['decomposePar', 'reconstructPar', 'reconstructParMesh'] or comm.endswith('Mesh')
+                if app == comm or comm.endswith('Foam') or is_utility or any(solver in comm for solver in CUSTOM_SOLVERS):
                     key = (cwd, comm)
                     if key not in processes:
                         processes[key] = []
@@ -336,9 +342,12 @@ def build_output(args):
     
     for (cwd, comm), pids in processes.items():
         pid = pids[0]
-        app = get_foam_application(cwd) or comm
+        app = get_foam_application(cwd)
+        is_utility = comm in ['decomposePar', 'reconstructPar', 'reconstructParMesh'] or comm.endswith('Mesh')
+        display_app = f"{comm} (Solver: {app})" if is_utility and app and app != comm else (app or comm)
+        
         nProcs = len(pids)
-        log_file = get_active_log_file(pid, cwd)
+        log_file = get_active_log_file(pid, cwd, comm)
         
         key = (cwd, pid)
         if key not in last_known_metrics:
@@ -385,7 +394,10 @@ def build_output(args):
             out.append("")
                 
             out.append(f"[INFO]  {'Case Folder':<25} : {os.path.basename(cwd)}")
-            out.append(f"[INFO]  {'Solver':<25} : {app}")
+            if is_utility:
+                out.append(f"[INFO]  {'Active Utility':<25} : {display_app}")
+            else:
+                out.append(f"[INFO]  {'Solver':<25} : {display_app}")
             
             if nProcs > 1:
                 out.append(f"[INFO]  {'Execution':<25} : Parallel ({nProcs} cores)")
@@ -500,6 +512,8 @@ def build_output(args):
                     except: pass
                     
             out.append(f"{'Case Dir':<8} : {os.path.basename(cwd)}")
+            if is_utility:
+                out.append(f"{'Utility':<8} : {comm}")
             
             elapsed_sec = get_elapsed_time(pid)
             elapsed_str = format_time(elapsed_sec)
