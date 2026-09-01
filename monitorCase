@@ -308,8 +308,19 @@ def get_openfoam_processes():
             with open(f'/proc/{pid}/comm', 'r') as f:
                 comm = f.read().strip()
                 
-            if comm in ['bash', 'zsh', 'systemd', 'kworker', 'python', 'python3', 'sshd', 'tmux']:
+            if comm in ['bash', 'zsh', 'systemd', 'kworker', 'python', 'python3', 'sshd', 'tmux', 'mpirun', 'orterun']:
                 continue
+
+            # Linux truncates /proc/<pid>/comm to 15 characters. Get full name from cmdline.
+            try:
+                with open(f'/proc/{pid}/cmdline', 'r') as f:
+                    cmdline = f.read().split('\0')
+                    if cmdline and cmdline[0]:
+                        cmd_base = os.path.basename(cmdline[0])
+                        if cmd_base.startswith(comm):
+                            comm = cmd_base
+            except:
+                pass
                 
             cwd = os.readlink(f'/proc/{pid}/cwd')
             if not cwd or cwd == '/':
