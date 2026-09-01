@@ -504,6 +504,10 @@ writeInterval=$(grep "^[[:space:]]*writeInterval" system/controlDict | head -1 |
 simStartT="0"
 if [[ "$mode" == "continue" ]] || [[ "$mode" == "reconstruct" ]]
 then
+    if grep -q "^[[:space:]]*startFrom[[:space:]]\+startTime;" system/controlDict; then
+        echo "[WARNING] runCase -c (continue) was called, but system/controlDict has 'startFrom startTime;'. The solver will restart from startTime!"
+    fi
+
     simStartT=$( {
         foamListTimes -latestTime
         foamListTimes -processor -latestTime
