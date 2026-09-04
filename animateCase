@@ -19,6 +19,17 @@ DEFAULT_RESOLUTION = [1280, 720]
 DEFAULT_FIELD = 'alpha.*'
 DEFAULT_FORMAT = '.avi'
 # =============================================================================
+def setup_display_env():
+    """Ensure DISPLAY and XAUTHORITY are configured for headless/SSH sessions."""
+    if not os.environ.get("DISPLAY"):
+        os.environ["DISPLAY"] = ":0"
+    if not os.environ.get("XAUTHORITY"):
+        xauth = os.path.expanduser("~/.Xauthority")
+        if os.path.exists(xauth):
+            os.environ["XAUTHORITY"] = xauth
+
+setup_display_env()
+
 def find_pvpython():
     pv_path = shutil.which('pvpython')
     if pv_path:
