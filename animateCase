@@ -55,7 +55,7 @@ def find_pvpython():
 
 PVPYTHON = find_pvpython()
 
-def find_openfoam_reader_name(state_file):
+def find_openfoam_reader_info(state_file):
     try:
         tree = ET.parse(state_file)
         root = tree.getroot()
@@ -68,11 +68,12 @@ def find_openfoam_reader_name(state_file):
                 
         # Match IDs to registration names in ProxyCollection
         for item in root.findall(".//ProxyCollection[@name='sources']/Item"):
-            if item.get('id') in reader_ids:
-                return item.get('name')
+            item_id = item.get('id')
+            if item_id in reader_ids:
+                return item_id, item.get('name')
     except Exception as e:
-        print(f"Warning: Could not parse state file to find reader name: {e}")
-    return None
+        print(f"Warning: Could not parse state file to find reader info: {e}")
+    return None, None
 
 def get_unique_animations_dir(base_dir):
     anim_dir = os.path.join(base_dir, "Animations")
@@ -85,7 +86,7 @@ def get_unique_animations_dir(base_dir):
             return new_dir
         counter += 1
 
-def generate_pvpython_script(state_file, reader_name):
+def generate_pvpython_script(state_file, reader_id, reader_name):
     script_content = """import sys
 import os
 from paraview.simple import *
@@ -107,12 +108,13 @@ if not os.path.exists(foam_file):
     if state_file:
         script_content += f"""
 state_file = {repr(state_file)}
+reader_id = {repr(reader_id)}
 reader_name = {repr(reader_name)}
 print(f"Loading state file {{state_file}}, replacing {{reader_name}} with {{foam_file}}")
-LoadState(state_file, filenames=[{{
-    "name": reader_name,
-    "FileName": foam_file
-}}])
+file_entry = {{"name": reader_name, "FileName": foam_file}}
+if reader_id:
+    file_entry["id"] = int(reader_id)
+LoadState(state_file, filenames=[file_entry])
 renderView = GetActiveViewOrCreate('RenderView')
 renderView.ViewSize = [res_x, res_y]
 try:
@@ -254,12 +256,13 @@ def main():
         
     # Process State File if provided
     reader_name = None
+    reader_id = None
     if args.state:
         args.state = os.path.abspath(args.state)
         if not os.path.exists(args.state):
             print(f"Error: State file not found at {args.state}")
             sys.exit(1)
-        reader_name = find_openfoam_reader_name(args.state)
+        reader_id, reader_name = find_openfoam_reader_info(args.state)
         if not reader_name:
             print("Error: Could not find an OpenFOAMReader proxy in the state file.")
             sys.exit(1)
@@ -293,7 +296,7 @@ def main():
     # Create temp pvpython script
     fd, script_path = tempfile.mkstemp(suffix=".py")
     with os.fdopen(fd, 'w') as f:
-        f.write(generate_pvpython_script(args.state, reader_name))
+        f.write(generate_pvpython_script(args.state, reader_id, reader_name))
         
     tasks = []
     for case in cases:
