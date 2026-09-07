@@ -17,6 +17,410 @@ batchCases=()
 originalArgs=()
 animate=false
 animArgs=()
+keepProcessors=false
+
+# Reconstruction verification state. These are populated immediately before
+# reconstructPar starts. Processor data is removed only if the same storage
+# directories still exist afterwards and all expected objects pass verification.
+reconstructionVerificationError=""
+reconstructionProcessorDirs=()
+reconstructionTimes=()
+reconstructionObjects=()
+declare -A reconstructionTimeSet=()
+declare -A reconstructionObjectSet=()
+declare -A reconstructionExpectedClass=()
+declare -A reconstructionBeforeState=()
+declare -A reconstructionProcessorDirState=()
+
+set_reconstruction_verification_error() {
+    reconstructionVerificationError="$1"
+    return 1
+}
+
+is_openfoam_processor_dir_name() {
+    local name="$1"
+    [[ "$name" =~ ^processor[0-9]+$ \
+        || "$name" =~ ^processors$ \
+        || "$name" =~ ^processors[0-9]+$ \
+        || "$name" =~ ^processors[0-9]+_[0-9]+-[0-9]+$ ]]
+}
+
+collect_openfoam_processor_dirs() {
+    local path name
+    collectedProcessorDirs=()
+
+    while IFS= read -r -d '' path; do
+        name=${path#./}
+        if is_openfoam_processor_dir_name "$name"; then
+            collectedProcessorDirs+=("$path")
+        fi
+    done < <(
+        find . -mindepth 1 -maxdepth 1 -name 'processor*' \
+            \( -type d -o -type l \) -print0 2>/dev/null
+    )
+}
+
+foam_file_class() {
+    local path="$1"
+
+    if [[ "$path" == *.gz ]]; then
+        gzip -cd -- "$path" 2>/dev/null
+    else
+        sed -n '1,100p;100q' -- "$path" 2>/dev/null
+    fi | awk '
+        /^[[:space:]]*FoamFile([[:space:]]|$)/ { inHeader=1; next }
+        inHeader && /^[[:space:]]*}/ { exit }
+        inHeader && /^[[:space:]]*class[[:space:]]+/ {
+            line=$0
+            sub(/^[[:space:]]*class[[:space:]]+/, "", line)
+            sub(/[[:space:]]*;.*/, "", line)
+            print line
+            exit
+        }
+    '
+}
+
+reconstructed_object_path() {
+    local logicalPath="$1"
+
+    if [[ -f "$logicalPath" ]]; then
+        printf '%s\n' "$logicalPath"
+    elif [[ -f "${logicalPath}.gz" ]]; then
+        printf '%s\n' "${logicalPath}.gz"
+    else
+        return 1
+    fi
+}
+
+reconstructed_object_state() {
+    local path
+    path=$(reconstructed_object_path "$1") || return 1
+    stat -Lc '%y|%s|%i' -- "$path" 2>/dev/null
+}
+
+record_expected_reconstruction_object() {
+    local logicalPath="$1"
+    local expectedClass="$2"
+
+    if [[ -z "${reconstructionObjectSet[$logicalPath]+x}" ]]; then
+        reconstructionObjectSet["$logicalPath"]=1
+        reconstructionObjects+=("$logicalPath")
+        reconstructionExpectedClass["$logicalPath"]="$expectedClass"
+        return 0
+    fi
+
+    # A collated source stores a decomposedBlockData wrapper instead of the
+    # reconstructed class, so only the destination header can be checked.
+    if [[ "${reconstructionExpectedClass[$logicalPath]}" == "__collated__" ]]; then
+        return 0
+    fi
+    if [[ "$expectedClass" == "__collated__" ]]; then
+        reconstructionExpectedClass["$logicalPath"]="__collated__"
+    elif [[ "${reconstructionExpectedClass[$logicalPath]}" != "$expectedClass" ]]; then
+        set_reconstruction_verification_error \
+            "processor objects disagree on the class for '$logicalPath'"
+        return 1
+    fi
+}
+
+prepare_reconstruction_verification() {
+    local fileHandlerArg="$1"
+    local processorTimesOutput manifestFile sourcePath processorDir candidateDir
+    local relativePath timeName logicalPath objectName sourceClass destination
+    local -a fileHandlerArgs=()
+
+    reconstructionVerificationError=""
+    reconstructionProcessorDirs=()
+    reconstructionTimes=()
+    reconstructionObjects=()
+    reconstructionTimeSet=()
+    reconstructionObjectSet=()
+    reconstructionExpectedClass=()
+    reconstructionBeforeState=()
+    reconstructionProcessorDirState=()
+
+    [[ -n "$fileHandlerArg" ]] && fileHandlerArgs=(-fileHandler collated)
+
+    collect_openfoam_processor_dirs
+    if [[ ${#collectedProcessorDirs[@]} -eq 0 ]]; then
+        set_reconstruction_verification_error \
+            "no recognized OpenFOAM processor directories were found"
+        return 1
+    fi
+
+    for processorDir in "${collectedProcessorDirs[@]}"; do
+        if [[ -L "$processorDir" ]]; then
+            set_reconstruction_verification_error \
+                "processor storage '$processorDir' is a symbolic link"
+            return 1
+        fi
+        reconstructionProcessorDirs+=("$processorDir")
+        reconstructionProcessorDirState["$processorDir"]=$(stat -Lc '%d:%i' \
+            -- "$processorDir" 2>/dev/null) || {
+            set_reconstruction_verification_error \
+                "could not identify processor storage '$processorDir'"
+            return 1
+        }
+    done
+
+    if ! processorTimesOutput=$(foamListTimes -processor \
+        "${fileHandlerArgs[@]}" -noZero 2>/dev/null); then
+        set_reconstruction_verification_error \
+            "foamListTimes could not read the processor time directories"
+        return 1
+    fi
+
+    while IFS= read -r timeName; do
+        [[ -z "$timeName" ]] && continue
+        reconstructionTimes+=("$timeName")
+        reconstructionTimeSet["$timeName"]=1
+    done <<< "$processorTimesOutput"
+
+    if [[ ${#reconstructionTimes[@]} -eq 0 ]]; then
+        set_reconstruction_verification_error \
+            "no non-zero processor times were reported by foamListTimes"
+        return 1
+    fi
+
+    manifestFile=$(mktemp log/.reconstruction-manifest.XXXXXX) || {
+        set_reconstruction_verification_error \
+            "could not create a temporary reconstruction manifest"
+        return 1
+    }
+
+    if ! find "${reconstructionProcessorDirs[@]}" -type f -print0 \
+        > "$manifestFile" 2>/dev/null; then
+        rm -f -- "$manifestFile"
+        set_reconstruction_verification_error \
+            "could not inventory the processor files"
+        return 1
+    fi
+
+    while IFS= read -r -d '' sourcePath; do
+        processorDir=""
+        for candidateDir in "${reconstructionProcessorDirs[@]}"; do
+            if [[ "$sourcePath" == "$candidateDir"/* ]]; then
+                processorDir="$candidateDir"
+                break
+            fi
+        done
+
+        if [[ -z "$processorDir" ]]; then
+            rm -f -- "$manifestFile"
+            set_reconstruction_verification_error \
+                "could not identify the processor root for '$sourcePath'"
+            return 1
+        fi
+
+        relativePath=${sourcePath#"$processorDir"/}
+        timeName=${relativePath%%/*}
+        [[ -z "${reconstructionTimeSet[$timeName]+x}" ]] && continue
+        [[ "$relativePath" == "$timeName" ]] && continue
+
+        logicalPath="$relativePath"
+        [[ "$logicalPath" == *.gz ]] && logicalPath=${logicalPath%.gz}
+        objectName=${logicalPath##*/}
+
+        case "$objectName" in
+            cellProcAddressing|faceProcAddressing|pointProcAddressing|boundaryProcAddressing)
+                continue
+                ;;
+        esac
+
+        if [[ ! -s "$sourcePath" ]]; then
+            rm -f -- "$manifestFile"
+            set_reconstruction_verification_error \
+                "processor object '$sourcePath' is empty"
+            return 1
+        fi
+
+        sourceClass=$(foam_file_class "$sourcePath")
+        if [[ -z "$sourceClass" ]]; then
+            rm -f -- "$manifestFile"
+            set_reconstruction_verification_error \
+                "could not read the FoamFile class from '$sourcePath'"
+            return 1
+        fi
+
+        if [[ "${processorDir#./}" == processors* ]]; then
+            sourceClass="__collated__"
+        fi
+
+        if ! record_expected_reconstruction_object "$logicalPath" "$sourceClass"; then
+            rm -f -- "$manifestFile"
+            return 1
+        fi
+    done < "$manifestFile"
+
+    rm -f -- "$manifestFile"
+
+    if [[ ${#reconstructionObjects[@]} -eq 0 ]]; then
+        set_reconstruction_verification_error \
+            "the processor manifest contained no reconstructable objects"
+        return 1
+    fi
+
+    for logicalPath in "${reconstructionObjects[@]}"; do
+        destination=$(reconstructed_object_path "$logicalPath" 2>/dev/null || true)
+        if [[ -n "$destination" ]]; then
+            reconstructionBeforeState["$logicalPath"]=$(reconstructed_object_state \
+                "$logicalPath" || true)
+        else
+            reconstructionBeforeState["$logicalPath"]=""
+        fi
+    done
+
+    return 0
+}
+
+verify_reconstructed_data() {
+    local rootTimesOutput timeName logicalPath destination destinationClass
+    local beforeState afterState processorDir latestTime
+    local -a currentProcessorDirs=()
+    local -A rootTimeSet=()
+    local -A currentProcessorDirSet=()
+
+    if ! grep -qE '^End[[:space:]]*$' log/log.reconstructPar 2>/dev/null; then
+        set_reconstruction_verification_error \
+            "reconstructPar did not write its normal End marker"
+        return 1
+    fi
+
+    if ! rootTimesOutput=$(foamListTimes -noZero 2>/dev/null); then
+        set_reconstruction_verification_error \
+            "foamListTimes could not read the reconstructed time directories"
+        return 1
+    fi
+
+    while IFS= read -r timeName; do
+        [[ -n "$timeName" ]] && rootTimeSet["$timeName"]=1
+    done <<< "$rootTimesOutput"
+
+    for timeName in "${reconstructionTimes[@]}"; do
+        if [[ -z "${rootTimeSet[$timeName]+x}" ]]; then
+            set_reconstruction_verification_error \
+                "reconstructed time '$timeName' is missing"
+            return 1
+        fi
+    done
+
+    collect_openfoam_processor_dirs
+    currentProcessorDirs=("${collectedProcessorDirs[@]}")
+    for processorDir in "${currentProcessorDirs[@]}"; do
+        currentProcessorDirSet["$processorDir"]=1
+    done
+
+    if [[ ${#currentProcessorDirs[@]} -ne ${#reconstructionProcessorDirs[@]} ]]; then
+        set_reconstruction_verification_error \
+            "the processor storage layout changed during reconstruction"
+        return 1
+    fi
+
+    for processorDir in "${reconstructionProcessorDirs[@]}"; do
+        if [[ -z "${currentProcessorDirSet[$processorDir]+x}" \
+            || -L "$processorDir" \
+            || "$(stat -Lc '%d:%i' -- "$processorDir" 2>/dev/null)" \
+                != "${reconstructionProcessorDirState[$processorDir]}" ]]; then
+            set_reconstruction_verification_error \
+                "processor storage '$processorDir' changed during reconstruction"
+            return 1
+        fi
+    done
+
+    for logicalPath in "${reconstructionObjects[@]}"; do
+        destination=$(reconstructed_object_path "$logicalPath" 2>/dev/null || true)
+        if [[ -z "$destination" || ! -s "$destination" || -L "$destination" ]]; then
+            set_reconstruction_verification_error \
+                "reconstructed object '$logicalPath' is missing, empty, or a symbolic link"
+            return 1
+        fi
+
+        destinationClass=$(foam_file_class "$destination")
+        if [[ -z "$destinationClass" ]]; then
+            set_reconstruction_verification_error \
+                "could not read the FoamFile class from '$destination'"
+            return 1
+        fi
+
+        if [[ "${reconstructionExpectedClass[$logicalPath]}" != "__collated__" \
+            && "$destinationClass" != "${reconstructionExpectedClass[$logicalPath]}" ]]; then
+            set_reconstruction_verification_error \
+                "class mismatch for '$logicalPath' (${reconstructionExpectedClass[$logicalPath]} -> $destinationClass)"
+            return 1
+        fi
+
+        # Existing fields must have been refreshed by this reconstruction.
+        # Mesh and uniform objects can legitimately be retained unchanged.
+        if [[ -n "${reconstructionBeforeState[$logicalPath]}" \
+            && "$logicalPath" != */polyMesh/* \
+            && "$logicalPath" != */uniform/* ]]; then
+            beforeState=${reconstructionBeforeState[$logicalPath]}
+            afterState=$(reconstructed_object_state "$logicalPath" || true)
+            if [[ -z "$afterState" || "$afterState" == "$beforeState" ]]; then
+                set_reconstruction_verification_error \
+                    "existing object '$logicalPath' was not refreshed"
+                return 1
+            fi
+        fi
+    done
+
+    latestTime=${reconstructionTimes[$(( ${#reconstructionTimes[@]} - 1 ))]}
+    if ! checkMesh -time "$latestTime" > log/log.verifyReconstruction 2>&1; then
+        set_reconstruction_verification_error \
+            "checkMesh could not read reconstructed time '$latestTime'"
+        return 1
+    fi
+
+    if grep -qE 'FOAM FATAL|Segmentation fault' \
+        log/log.verifyReconstruction 2>/dev/null; then
+        set_reconstruction_verification_error \
+            "checkMesh reported a fatal error for reconstructed time '$latestTime'"
+        return 1
+    fi
+
+    return 0
+}
+
+remove_verified_processor_dirs() {
+    local processorDir processorName cleanupStage movedDir
+    local -a movedProcessorDirs=()
+
+    for processorDir in "${reconstructionProcessorDirs[@]}"; do
+        if [[ ! -d "$processorDir" || -L "$processorDir" ]]; then
+            echo "[WARN]  Processor storage changed before cleanup; preserving all remaining data."
+            return 1
+        fi
+    done
+
+    cleanupStage=$(mktemp -d .runCase-processor-cleanup.XXXXXX) || {
+        echo "[ERROR] Could not create the processor cleanup staging directory."
+        return 1
+    }
+
+    # Move the complete set first. On a normal case filesystem these renames are
+    # atomic and do not duplicate the (potentially very large) processor data.
+    for processorDir in "${reconstructionProcessorDirs[@]}"; do
+        processorName=${processorDir#./}
+        if mv -- "$processorDir" "$cleanupStage/$processorName"; then
+            movedProcessorDirs+=("$processorName")
+        else
+            echo "[ERROR] Could not stage '$processorDir' for cleanup; rolling back."
+            for movedDir in "${movedProcessorDirs[@]}"; do
+                mv -- "$cleanupStage/$movedDir" "./$movedDir" 2>/dev/null || true
+            done
+            rmdir -- "$cleanupStage" 2>/dev/null || true
+            return 1
+        fi
+    done
+
+    if ! rm -rf -- "$cleanupStage"; then
+        echo "[ERROR] Could not fully remove verified processor data."
+        echo "        Any remaining data is preserved under '$cleanupStage'."
+        return 1
+    fi
+
+    return 0
+}
 
 while [[ "$#" -gt 0 ]]
 do
@@ -33,6 +437,8 @@ do
             echo "Options:"
             echo "  -np <number>        Overrides numberOfSubdomains to use <number> processors."
             echo "  -q,  --quiet        Suppresses interactive terminal output."
+            echo "  -k,  --keep-processors"
+            echo "                      Preserves processor data after successful reconstruction."
             echo "  -a,  --animate      Runs animateCase automatically when finished."
             echo "                      Optional animation flags: -s|--state <file>, --fps <num>,"
             echo "                                                --res <w> <h>, --field <name>"
@@ -47,6 +453,7 @@ do
         -r|--reconstruct) mode="reconstruct"; originalArgs+=("$1") ;;
         -clean) mode="clean"; originalArgs+=("$1") ;;
         -q|--quiet) quiet=true; originalArgs+=("$1") ;;
+        -k|--keep-processors) keepProcessors=true; originalArgs+=("$1") ;;
         -a|--animate) animate=true ;;
         -s|--state) animArgs+=("$1" "$2"); shift ;;
         --fps) animArgs+=("$1" "$2"); shift ;;
@@ -631,7 +1038,8 @@ then
         exit 0
     fi
     
-    if ! ls -d processor* >/dev/null 2>&1
+    collect_openfoam_processor_dirs
+    if [[ ${#collectedProcessorDirs[@]} -eq 0 ]]
     then
         echo "[INFO]  No processor directories found. Case is already reconstructed or not decomposed."
         exit 0
@@ -934,9 +1342,13 @@ then
     reconstructSuccess=true
 
     fileHandlerArg=""
-    if [[ -d "processors${nProcs}" ]] || [[ -n $(find . -maxdepth 1 -type d -name "processors*" -print -quit) ]]; then
-        fileHandlerArg="-fileHandler collated"
-    fi
+    collect_openfoam_processor_dirs
+    for processorDir in "${collectedProcessorDirs[@]}"; do
+        if [[ "${processorDir#./}" == processors* ]]; then
+            fileHandlerArg="-fileHandler collated"
+            break
+        fi
+    done
 
     if [[ "$isDynamicMesh" == true ]]
     then
@@ -977,6 +1389,17 @@ then
     then
         printf "[RUN]   %-40s\n" "Reconstructing results"
         echo "Reconstructing" > log/.batch_stage
+
+        reconstructionVerificationPrepared=false
+        if [[ "$keepProcessors" == false ]]; then
+            if prepare_reconstruction_verification "$fileHandlerArg"; then
+                reconstructionVerificationPrepared=true
+            else
+                printf "[WARN]  Reconstruction verification could not be prepared.\n"
+                printf "        %s. Processor directories will be preserved.\n" \
+                    "$reconstructionVerificationError"
+            fi
+        fi
         
         # Get all reconstructed times
         reconstructTimes=$(foamListTimes -processor $fileHandlerArg 2>/dev/null | grep -ve '^$' | sort -V)
@@ -1042,9 +1465,23 @@ then
         then
             # Clear progress bar and Reconstructing Timestep lines
             if [[ "$quiet" == false ]]; then echo -en "\033[2A\033[2K\033[1B\033[2K\033[1A"; fi
-            
-            printf "[CLEAN] %-40s\n" "Removing processor directories"
-            rm -rf processor*
+
+            if [[ "$keepProcessors" == true ]]; then
+                printf "[KEEP]  %-40s\n" "Processor directories preserved (--keep-processors)"
+            elif [[ "$reconstructionVerificationPrepared" != true ]]; then
+                printf "[KEEP]  %-40s\n" "Processor directories preserved (verification unavailable)"
+            else
+                printf "[VERIFY] %-40s\n" "Checking reconstructed data"
+                if verify_reconstructed_data "$fileHandlerArg"; then
+                    printf "[VERIFY] %-40s\n" "Reconstructed data verified"
+                    printf "[CLEAN] %-40s\n" "Removing verified processor directories"
+                    remove_verified_processor_dirs
+                else
+                    printf "[WARN]  Reconstruction verification failed.\n"
+                    printf "        %s. Processor directories were preserved.\n" \
+                        "$reconstructionVerificationError"
+                fi
+            fi
         else
             echo ""
             printf "[ERROR] reconstructPar failed. Processor directories preserved.\n"

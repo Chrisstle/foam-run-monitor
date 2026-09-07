@@ -13,7 +13,8 @@ A collection of robust utility scripts designed to streamline the execution and 
 - **Mesh Validation**: Runs a pre-flight `checkMesh` to ensure mesh validity before starting the solver.
 - **Active Monitoring**: Active monitoring of the case, similar in style as `monitorCase` (see examples below).
 - **Automated Reconstruction**: Automatically handles `reconstructParMesh` (if a dynamic mesh is used) followed by `reconstructPar` at the end of a parallel run, cleaning up processor directories upon success.
-- **Failsafe Mechanisms**: Gracefully intercepts `Ctrl+C` to cleanly kill background solvers. Skips cleanup if reconstruction encounters errors, preserving your `processor*` directories.
+- **Verified Reconstruction Cleanup**: Before removing processor data, verifies the reconstructed time set, object manifest, OpenFOAM file classes, refreshed outputs, and latest reconstructed mesh readability. Any uncertainty preserves the processor directories.
+- **Failsafe Mechanisms**: Gracefully intercepts `Ctrl+C` to cleanly kill background solvers. Skips cleanup if reconstruction or its verification encounters errors.
 - **Batch Processing & Job Pool**: Run multiple case directories sequentially or in parallel (`-P`). Features a native, live-updating TUI dashboard that tracks the status of all queued and active jobs.
 
 ### Usage
@@ -38,6 +39,7 @@ You must specify exactly one of the following modes to run the script:
 | `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. If running in batch mode, it updates the dictionary for *all* target cases before starting. |
 | `-P, --jobs <num>`| Number of concurrent jobs to run. Automatically enables batch execution mode (default: 1). **Note on Batch Mode:** Batch execution and recursive scanning are automatically triggered if you pass multiple positional arguments or if you run the script in a directory without a `system/controlDict` (e.g., a parametric study root). |
 | `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
+| `-k, --keep-processors` | Always preserves decomposed processor data after successful reconstruction, bypassing automatic verification and cleanup. |
 | `-a, --animate` | Triggers `animateCase` automatically when the simulation completes (or collectively at the end of a batch). |
 | `-s, --fps, --res, --field` | Optional flags to pass directly to `animateCase` when using `-a`. (e.g. `--fps 5 -s custom.pvsm`) |
 | `-h, --help` | Show the help message and exit. |
@@ -85,6 +87,9 @@ If `dynamicFvMesh` (e.g., Adaptive Mesh Refinement) is detected in `constant/dyn
 1. `monitorCase` and `runCase` will dynamically display current cell counts by parsing the solver output.
 2. During reconstruction, `runCase` automatically executes `reconstructParMesh`
 before `reconstructPar`.
+3. Processor storage is removed only after reconstruction exits successfully and
+the reconstructed times, objects, headers, and latest mesh pass verification.
+Use `--keep-processors` to retain processor data unconditionally.
 
 ---
 
