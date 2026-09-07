@@ -11,6 +11,7 @@ mode=""
 customNP=""
 quiet=false
 forceNew=false
+batchNewIfEmpty=false
 isBatch=false
 batchJobs=1
 batchCases=()
@@ -31,6 +32,7 @@ declare -A reconstructionObjectSet=()
 declare -A reconstructionExpectedClass=()
 declare -A reconstructionBeforeState=()
 declare -A reconstructionProcessorDirState=()
+declare -A batchCleanupApproved=()
 
 set_reconstruction_verification_error() {
     reconstructionVerificationError="$1"
@@ -58,6 +60,99 @@ collect_openfoam_processor_dirs() {
         find . -mindepth 1 -maxdepth 1 -name 'processor*' \
             \( -type d -o -type l \) -print0 2>/dev/null
     )
+}
+
+case_has_openfoam_processor_data() {
+    local caseDir="${1:-.}"
+    local path name
+
+    while IFS= read -r -d '' path; do
+        name=${path##*/}
+        if is_openfoam_processor_dir_name "$name"; then
+            return 0
+        fi
+    done < <(
+        find "$caseDir" -mindepth 1 -maxdepth 1 -name 'processor*' \
+            \( -type d -o -type l \) -print0 2>/dev/null
+    )
+
+    return 1
+}
+
+is_openfoam_time_dir_name() {
+    local name="$1"
+    [[ "$name" =~ ^[+-]?(([0-9]+([.][0-9]*)?)|([.][0-9]+))([eE][+-]?[0-9]+)?$ ]]
+}
+
+is_zero_time_dir_name() {
+    local name="$1"
+    [[ "$name" =~ ^[+-]?(0+([.]0*)?|[.]0+)([eE][+-]?[0-9]+)?$ ]]
+}
+
+case_has_simulation_data() {
+    local caseDir="${1:-.}"
+    local timesOutput path name
+
+    if case_has_openfoam_processor_data "$caseDir"; then
+        return 0
+    fi
+
+    # Let OpenFOAM define which directory names are valid times. This covers
+    # decimal, signed, and scientific notation across Foundation and ESI builds.
+    if timesOutput=$(cd -- "$caseDir" && foamListTimes -noZero 2>/dev/null); then
+        [[ -n "$(printf '%s\n' "$timesOutput" | awk 'NF { print; exit }')" ]]
+        return
+    fi
+
+    # If foamListTimes cannot inspect the case, fail safe: recognize the common
+    # scalar spellings ourselves and require confirmation rather than risk loss.
+    while IFS= read -r -d '' path; do
+        name=${path##*/}
+        if is_openfoam_time_dir_name "$name" && ! is_zero_time_dir_name "$name"; then
+            return 0
+        fi
+    done < <(find "$caseDir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+    return 1
+}
+
+remove_openfoam_processor_dirs() {
+    collect_openfoam_processor_dirs
+    if [[ ${#collectedProcessorDirs[@]} -eq 0 ]]; then
+        return 0
+    fi
+    rm -rf -- "${collectedProcessorDirs[@]}"
+}
+
+openfoam_command_supports_option() {
+    local commandName="$1"
+    local optionName="$2"
+
+    command -v "$commandName" >/dev/null 2>&1 || return 1
+    "$commandName" -help 2>&1 \
+        | grep -qE -- "(^|[[:space:]])${optionName}([[:space:]]|$)"
+}
+
+collect_reconstructed_region_names() {
+    local latestTime="$1"
+    local searchRoot polyMeshDir regionName
+    local -A seenRegions=()
+
+    collectedRegionNames=()
+    for searchRoot in constant "$latestTime"; do
+        [[ -d "$searchRoot" ]] || continue
+        while IFS= read -r -d '' polyMeshDir; do
+            regionName=${polyMeshDir%/polyMesh}
+            regionName=${regionName##*/}
+            if [[ -n "$regionName" && -z "${seenRegions[$regionName]+x}" ]]; then
+                seenRegions["$regionName"]=1
+                collectedRegionNames+=("$regionName")
+            fi
+        done < <(
+            find "$searchRoot" -mindepth 2 -maxdepth 2 -type d \
+                -name polyMesh -print0 2>/dev/null
+        )
+    done
 }
 
 foam_file_class() {
@@ -274,9 +369,12 @@ prepare_reconstruction_verification() {
 }
 
 verify_reconstructed_data() {
-    local rootTimesOutput timeName logicalPath destination destinationClass
+    local reconstructAllRegions="${2:-false}"
+    local rootTimesOutput timeName logicalPath destination destinationClass regionName
     local beforeState afterState processorDir latestTime
+    local checkedRegionMesh=false
     local -a currentProcessorDirs=()
+    local -a checkMeshArgs=()
     local -A rootTimeSet=()
     local -A currentProcessorDirSet=()
 
@@ -365,7 +463,48 @@ verify_reconstructed_data() {
     done
 
     latestTime=${reconstructionTimes[$(( ${#reconstructionTimes[@]} - 1 ))]}
-    if ! checkMesh -time "$latestTime" > log/log.verifyReconstruction 2>&1; then
+    checkMeshArgs=(-time "$latestTime")
+    if [[ "$reconstructAllRegions" == true ]]; then
+        if openfoam_command_supports_option checkMesh -allRegions; then
+            checkMeshArgs=(-allRegions "${checkMeshArgs[@]}")
+            if ! checkMesh "${checkMeshArgs[@]}" \
+                > log/log.verifyReconstruction 2>&1; then
+                set_reconstruction_verification_error \
+                    "checkMesh could not read all reconstructed regions at time '$latestTime'"
+                return 1
+            fi
+        elif openfoam_command_supports_option checkMesh -region; then
+            collect_reconstructed_region_names "$latestTime"
+            : > log/log.verifyReconstruction
+            if [[ -d constant/polyMesh || -d "$latestTime/polyMesh" ]]; then
+                if ! checkMesh -time "$latestTime" \
+                    >> log/log.verifyReconstruction 2>&1; then
+                    set_reconstruction_verification_error \
+                        "checkMesh could not read the reconstructed default region at time '$latestTime'"
+                    return 1
+                fi
+                checkedRegionMesh=true
+            fi
+            for regionName in "${collectedRegionNames[@]}"; do
+                if ! checkMesh -region "$regionName" -time "$latestTime" \
+                    >> log/log.verifyReconstruction 2>&1; then
+                    set_reconstruction_verification_error \
+                        "checkMesh could not read reconstructed region '$regionName' at time '$latestTime'"
+                    return 1
+                fi
+                checkedRegionMesh=true
+            done
+            if [[ "$checkedRegionMesh" != true ]]; then
+                set_reconstruction_verification_error \
+                    "no reconstructed region meshes were found for readability checks"
+                return 1
+            fi
+        else
+            set_reconstruction_verification_error \
+                "checkMesh does not support multi-region verification in this OpenFOAM version"
+            return 1
+        fi
+    elif ! checkMesh "${checkMeshArgs[@]}" > log/log.verifyReconstruction 2>&1; then
         set_reconstruction_verification_error \
             "checkMesh could not read reconstructed time '$latestTime'"
         return 1
@@ -449,6 +588,7 @@ do
             ;;
         -n|--new) mode="new"; originalArgs+=("$1") ;;
         --force-new) mode="new"; forceNew=true; originalArgs+=("$1") ;;
+        --batch-new-if-empty) mode="new"; batchNewIfEmpty=true ;;
         -c|--continue) mode="continue"; originalArgs+=("$1") ;;
         -r|--reconstruct) mode="reconstruct"; originalArgs+=("$1") ;;
         -clean) mode="clean"; originalArgs+=("$1") ;;
@@ -574,21 +714,16 @@ if [[ "$isBatch" == true ]]; then
     if [[ "$mode" == "new" ]]; then
         casesWithData=()
         for c in "${validCases[@]}"; do
-            hasData=0
-            if ls -d "$c"/processor* >/dev/null 2>&1; then hasData=1; fi
-            if find "$c" -maxdepth 1 -type d -name "[0-9]*" | grep -vE '/0$' | grep -qE '/[0-9]+(\.[0-9]+)?$'; then 
-                hasData=1
-            fi
-            if [[ "$hasData" -eq 1 ]]; then
-                casesWithData+=("$(basename "$c")")
+            if case_has_simulation_data "$c"; then
+                casesWithData+=("$c")
             fi
         done
         
         if [[ ${#casesWithData[@]} -gt 0 ]]; then
             echo ""
             echo "[WARN]  Existing simulation data detected in the following cases:"
-            for cwd in "${casesWithData[@]}"; do
-                echo "          - $cwd"
+            for c in "${casesWithData[@]}"; do
+                echo "          - $(basename "$c")"
             done
             read -r -p "        Delete data and restart these simulations? [y/N]: " reply
             if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]; then
@@ -596,12 +731,10 @@ if [[ "$isBatch" == true ]]; then
                 exit 1
             fi
             
-            # Since user approved, we replace -n/--new with --force-new in originalArgs
-            # so the background workers bypass the individual prompt.
-            for i in "${!originalArgs[@]}"; do
-                if [[ "${originalArgs[$i]}" == "-n" || "${originalArgs[$i]}" == "--new" ]]; then
-                    originalArgs[$i]="--force-new"
-                fi
+            # Approval is recorded per case. Cases that were empty retain a
+            # fail-closed worker guard in case data appears while they wait.
+            for c in "${casesWithData[@]}"; do
+                batchCleanupApproved["$c"]=true
             done
         fi
     fi
@@ -689,6 +822,18 @@ if [[ "$isBatch" == true ]]; then
         while [[ $running_jobs -lt $batchJobs ]] && [[ $next_job -lt ${#validCases[@]} ]]; do
             c_dir="${validCases[$next_job]}"
             workerArgs=("${originalArgs[@]}")
+            if [[ "$mode" == "new" ]]; then
+                for i in "${!workerArgs[@]}"; do
+                    if [[ "${workerArgs[$i]}" == "-n" \
+                        || "${workerArgs[$i]}" == "--new" ]]; then
+                        if [[ "${batchCleanupApproved[$c_dir]:-false}" == true ]]; then
+                            workerArgs[$i]="--force-new"
+                        else
+                            workerArgs[$i]="--batch-new-if-empty"
+                        fi
+                    fi
+                done
+            fi
             if [[ "$quiet" == false ]]; then workerArgs+=("--quiet"); fi
             
             mkdir -p "$c_dir/log"
@@ -833,7 +978,19 @@ if [[ "$isBatch" == true ]]; then
                     animationFile="$animationOutDir/${c_name}.avi"
                     crashedAnimationFile="$animationOutDir/${c_name}_Crashed.avi"
                     if [[ -f "$animationFile" ]]; then
-                        mv -- "$animationFile" "$crashedAnimationFile"
+                        if [[ -e "$crashedAnimationFile" || -L "$crashedAnimationFile" ]]; then
+                            crashedAnimationIndex=1
+                            while [[ -e "$animationOutDir/${c_name}_Crashed_${crashedAnimationIndex}.avi" \
+                                || -L "$animationOutDir/${c_name}_Crashed_${crashedAnimationIndex}.avi" ]]; do
+                                ((crashedAnimationIndex++))
+                            done
+                            crashedAnimationFile="$animationOutDir/${c_name}_Crashed_${crashedAnimationIndex}.avi"
+                        fi
+                        if ! mv -n -- "$animationFile" "$crashedAnimationFile"; then
+                            echo "[WARN]  Could not preserve crashed animation '$animationFile'."
+                        elif [[ -e "$animationFile" || -L "$animationFile" ]]; then
+                            echo "[WARN]  Crash animation destination appeared concurrently; '$animationFile' was preserved."
+                        fi
                     fi
                 fi
             done
@@ -857,7 +1014,10 @@ then
     printf "[CLEAN] %-40s\n" "Cleaning case directory"
     find log/ -type f ! -name 'log.checkMesh' -delete
     foamListTimes -rm
-    rm -rf processor*
+    if ! remove_openfoam_processor_dirs; then
+        echo "[ERROR] Could not remove all recognized OpenFOAM processor directories."
+        exit 1
+    fi
     if [[ -d "0.orig" ]]; then rm -rf 0; cp -r 0.orig 0; fi
     setFields > log/log.setFields 2>&1
     echo ""
@@ -910,15 +1070,19 @@ fi
 # Detect Dynamic Mesh Configuration
 isDynamicMesh=false
 meshTypeStr="Static"
-if [[ -f "constant/dynamicMeshDict" ]]
-then
-    meshType=$(grep "^[[:space:]]*dynamicFvMesh" constant/dynamicMeshDict | awk '{print $2}' | sed 's/;//')
+while IFS= read -r -d '' dynamicMeshDict; do
+    meshType=$(grep "^[[:space:]]*dynamicFvMesh" "$dynamicMeshDict" \
+        | awk '{print $2}' | sed 's/;//')
     if [[ -n "$meshType" ]] && [[ "$meshType" != "staticFvMesh" ]]
     then
         isDynamicMesh=true
         meshTypeStr="Dynamic (AMR)"
+        break
     fi
-fi
+done < <(
+    find constant -mindepth 1 -maxdepth 2 -type f \
+        -name dynamicMeshDict -print0 2>/dev/null
+)
 
 endTime=$(grep "^[[:space:]]*endTime" system/controlDict | awk '{print $2}' | sed 's/;//')
 writeInterval=$(grep "^[[:space:]]*writeInterval" system/controlDict | head -1 | awk '{print $2}' | sed 's/;//')
@@ -1062,14 +1226,16 @@ then
     fi
 else
     hasData=0
-    if ls -d processor* >/dev/null 2>&1; then hasData=1; fi
-    if find . -maxdepth 1 -type d -name "[0-9]*" | grep -vE '/0$' | grep -qE '/[0-9]+(\.[0-9]+)?$'; then 
-        hasData=1
-    fi
+    if case_has_simulation_data .; then hasData=1; fi
 
     if [[ "$mode" == "new" ]]
     then
-        if [[ "$hasData" -eq 1 ]] && [[ "$forceNew" == false ]]
+        if [[ "$hasData" -eq 1 ]] && [[ "$batchNewIfEmpty" == true ]]
+        then
+            echo "[ERROR] Unapproved simulation data appeared while this batch case was queued."
+            echo "        No data was removed; rerun the batch command to review it."
+            exit 1
+        elif [[ "$hasData" -eq 1 ]] && [[ "$forceNew" == false ]]
         then
             echo ""
             printf "[WARN]  %-25s\n" "Existing simulation data detected."
@@ -1085,7 +1251,10 @@ else
         printf "[CLEAN] %-40s\n" "Cleaning case directory"
         find log/ -type f ! -name 'log.checkMesh' -delete
         foamListTimes -rm
-        rm -rf processor*
+        if ! remove_openfoam_processor_dirs; then
+            echo "[ERROR] Could not remove all recognized OpenFOAM processor directories."
+            exit 1
+        fi
         if [[ -d "0.orig" ]]; then rm -rf 0; cp -r 0.orig 0; fi
         setFields > log/log.setFields 2>&1
         echo ""
@@ -1097,7 +1266,8 @@ else
 
     if [[ "$runParallel" == true ]]
     then
-        if ! ls -d processor* >/dev/null 2>&1
+        collect_openfoam_processor_dirs
+        if [[ ${#collectedProcessorDirs[@]} -eq 0 ]]
         then
             printf "[RUN]   Decomposing domain"
             echo "Decomposing" > log/.batch_stage
@@ -1356,6 +1526,8 @@ fi
 if [[ "$runParallel" == true ]]
 then
     reconstructSuccess=true
+    reconstructAllRegions=false
+    reconstructionRegionArg=""
 
     fileHandlerArg=""
     collect_openfoam_processor_dirs
@@ -1366,7 +1538,25 @@ then
         fi
     done
 
-    if [[ "$isDynamicMesh" == true ]]
+    if [[ -f constant/regionProperties ]]; then
+        if ! openfoam_command_supports_option reconstructPar -allRegions; then
+            reconstructSuccess=false
+            echo ""
+            printf "[ERROR] This OpenFOAM version cannot reconstruct all regions safely.\n"
+            printf "        Processor directories were preserved.\n"
+        elif [[ "$isDynamicMesh" == true ]] \
+            && ! openfoam_command_supports_option reconstructParMesh -allRegions; then
+            reconstructSuccess=false
+            echo ""
+            printf "[ERROR] This OpenFOAM version cannot reconstruct all dynamic region meshes safely.\n"
+            printf "        Processor directories were preserved.\n"
+        else
+            reconstructAllRegions=true
+            reconstructionRegionArg="-allRegions"
+        fi
+    fi
+
+    if [[ "$isDynamicMesh" == true && "$reconstructSuccess" == true ]]
     then
         skipReconstructMesh=false
         if [[ -f "log/log.reconstructParMesh" && "log/log.reconstructParMesh" -nt "log/log.run" ]]; then
@@ -1391,7 +1581,8 @@ then
         else
             printf "[RUN]   %-40s\n" "Reconstructing dynamic mesh"
             echo "Reconstructing Mesh" > log/.batch_stage
-            if ! reconstructParMesh $fileHandlerArg >> log/log.reconstructParMesh 2>&1
+            if ! reconstructParMesh $fileHandlerArg $reconstructionRegionArg \
+                >> log/log.reconstructParMesh 2>&1
             then
                 reconstructSuccess=false
                 echo ""
@@ -1422,7 +1613,8 @@ then
         totalTimesCount=$(echo "$reconstructTimes" | grep -ve '^$' | wc -l)
         
         # Start reconstructPar in the background
-        reconstructPar $fileHandlerArg > log/log.reconstructPar 2>&1 &
+        reconstructPar $fileHandlerArg $reconstructionRegionArg \
+            > log/log.reconstructPar 2>&1 &
         reconstruct_pid=$!
         
         # Trap SIGINT and SIGTERM to kill reconstructPar if interrupted
@@ -1488,7 +1680,7 @@ then
                 printf "[KEEP]  %-40s\n" "Processor directories preserved (verification unavailable)"
             else
                 printf "[VERIFY] %-40s\n" "Checking reconstructed data"
-                if verify_reconstructed_data "$fileHandlerArg"; then
+                if verify_reconstructed_data "$fileHandlerArg" "$reconstructAllRegions"; then
                     printf "[VERIFY] %-40s\n" "Reconstructed data verified"
                     printf "[CLEAN] %-40s\n" "Removing verified processor directories"
                     remove_verified_processor_dirs

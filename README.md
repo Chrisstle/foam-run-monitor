@@ -28,10 +28,10 @@ You must specify exactly one of the following modes to run the script:
 
 | Flag | Description |
 | :--- | :--- |
-| `-n, --new` | Starts a **new** simulation. Cleans the case directory, removing old logs, `processor*` folders, and time directories. (Will prompt for confirmation if existing data is found). |
+| `-n, --new` | Starts a **new** simulation. Cleans the case directory, removing old logs, recognized OpenFOAM processor storage, and time directories. Signed and scientific-notation times are included in the confirmation check. |
 | `-c, --continue` | **Continues** an existing simulation from the `latestTime` available. |
 | `-r, --reconstruct`| Only performs **manual reconstruction** (`reconstructParMesh` & `reconstructPar`) on a stopped/completed parallel run without starting the solver. |
-| `-clean` | **Cleans** the case directory immediately. Deletes logs, `processor*` directories, time folders, resets the `0` directory from `0.orig` (if it exists), and runs `setFields`. |
+| `-clean` | **Cleans** the case directory immediately. Deletes logs, recognized OpenFOAM processor storage, and time folders, resets the `0` directory from `0.orig` (if it exists), and runs `setFields`. Similarly named backups such as `processorBackup` are left untouched. |
 
 #### Options (Optional)
 | Flag | Description |
@@ -90,6 +90,12 @@ before `reconstructPar`.
 3. Processor storage is removed only after reconstruction exits successfully and
 the reconstructed times, objects, headers, and latest mesh pass verification.
 Use `--keep-processors` to retain processor data unconditionally.
+Multi-region cases are reconstructed with `-allRegions` when that option is
+reported by the installed OpenFOAM commands. Verification uses `checkMesh -allRegions`
+where available and otherwise checks each discovered region with
+`checkMesh -region`, as required by versions such as OpenFOAM Foundation v10.
+If the installed version cannot provide safe all-region reconstruction or
+verification, processor data is kept.
 
 ---
 
