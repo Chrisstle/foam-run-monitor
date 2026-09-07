@@ -576,40 +576,44 @@ then
 fi
 
 # --- Aligned Setup Info ---
-echo "================================================================================"
-echo ""
-printf "[INFO]  %-25s : %s\n" "Case Folder" "$(basename "$(pwd)")"
-printf "[INFO]  %-25s : %s\n" "OpenFOAM Version" "$ofVersion"
-printf "[INFO]  %-25s : %s\n" "Solver" "$solver"
-if [[ "$runParallel" == true ]]
-then
-    printf "[INFO]  %-25s : Parallel (%s cores)\n" "Execution" "$nProcs"
-else
-    printf "[INFO]  %-25s : Serial (1 core)\n" "Execution"
-fi
-printf "[INFO]  %-25s : %s s\n" "Target endTime" "$endTime"
-printf "[INFO]  %-25s : %s s\n" "Write Interval" "$writeInterval"
-printf "[INFO]  %-25s : %s\n" "Mesh Type" "$meshTypeStr"
-printf "[INFO]  %-25s : %s\n" "Mesh Status" "$meshStatus"
-cellLabel="Cell Count"
-coreLabel="Cells per Core"
-if [[ "$isDynamicMesh" == true ]]; then
-    cellLabel="Initial Cell Count"
-    coreLabel="Initial Cells per Core"
-fi
-
-printf "[INFO]  %-25s : %s\n" "$cellLabel" "$cellCount"
-if [[ "$runParallel" == true ]]
-then
-    printf "[INFO]  %-25s : %s\n" "$coreLabel" "$cellsPerProc"
-fi
-echo ""
-printf "[INFO]  %-25s : %s s\n" "Starting from" "$simStartT"
-if [[ "$mode" == "continue" ]]; then
-    if grep -q "^[[:space:]]*startFrom[[:space:]]\+startTime;" system/controlDict; then
-        echo -e "\033[0;33m[WARNING] runCase -c (continue) was called, but system/controlDict has 'startFrom startTime;'. The solver will restart from startTime!\033[0m"
+print_case_info() {
+    echo "================================================================================"
+    echo ""
+    printf "[INFO]  %-25s : %s\n" "Case Folder" "$(basename "$(pwd)")"
+    printf "[INFO]  %-25s : %s\n" "OpenFOAM Version" "$ofVersion"
+    printf "[INFO]  %-25s : %s\n" "Solver" "$solver"
+    if [[ "$runParallel" == true ]]
+    then
+        printf "[INFO]  %-25s : Parallel (%s cores)\n" "Execution" "$nProcs"
+    else
+        printf "[INFO]  %-25s : Serial (1 core)\n" "Execution"
     fi
-fi
+    printf "[INFO]  %-25s : %s s\n" "Target endTime" "$endTime"
+    printf "[INFO]  %-25s : %s s\n" "Write Interval" "$writeInterval"
+    printf "[INFO]  %-25s : %s\n" "Mesh Type" "$meshTypeStr"
+    printf "[INFO]  %-25s : %s\n" "Mesh Status" "$meshStatus"
+    local cellLabel="Cell Count"
+    local coreLabel="Cells per Core"
+    if [[ "$isDynamicMesh" == true ]]; then
+        cellLabel="Initial Cell Count"
+        coreLabel="Initial Cells per Core"
+    fi
+
+    printf "[INFO]  %-25s : %s\n" "$cellLabel" "$cellCount"
+    if [[ "$runParallel" == true ]]
+    then
+        printf "[INFO]  %-25s : %s\n" "$coreLabel" "$cellsPerProc"
+    fi
+    echo ""
+    printf "[INFO]  %-25s : %s s\n" "Starting from" "$simStartT"
+    if [[ "$mode" == "continue" ]]; then
+        if grep -q "^[[:space:]]*startFrom[[:space:]]\+startTime;" system/controlDict; then
+            echo -e "\033[0;33m[WARNING] runCase -c (continue) was called, but system/controlDict has 'startFrom startTime;'. The solver will restart from startTime!\033[0m"
+        fi
+    fi
+}
+
+print_case_info
 
 # -----------------------------------------------------------------------------
 # 2. Mode Specific Logic
@@ -713,11 +717,37 @@ else
 
     # Intercept Ctrl+C and kill the background solver process
     trap 'echo -e "\n[ABORT] User interrupt. Terminating solver..."; kill -TERM "$solver_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+    trap 'redraw_ui=true' SIGWINCH
+
+    redraw_ui=false
 
     if [[ "$quiet" == false ]]; then echo -e "\n\n\n\n\n\n\n\n\n\n\n\n"; fi
+    
+    last_output=""
 
     while kill -0 "$solver_pid" 2>/dev/null
     do
+        if [[ "$redraw_ui" == true && "$quiet" == false ]]; then
+            clear
+            print_case_info
+            if [[ "$runParallel" == true ]]; then
+                printf "[RUN]   Starting %s in parallel (%s cores)\n" "$solver" "$nProcs"
+            else
+                printf "[RUN]   Starting %s in serial\n" "$solver"
+            fi
+            echo -e "\n\n\n\n\n\n\n\n\n\n\n\n"
+            
+            if [[ "$last_output" != "WAITING" ]] && [[ -n "$last_output" ]]
+            then
+                temp="${last_output//[^$'\n']/}"
+                num_lines=$(( ${#temp} + 1 ))
+                echo -en "\033[${num_lines}A"
+                while IFS= read -r line; do echo -e "\033[2K$line"; done <<< "$last_output"
+            fi
+            
+            redraw_ui=false
+        fi
+
         sleep 5
         if [[ "$quiet" == true ]]; then continue; fi
         
@@ -870,6 +900,7 @@ else
         }')
 
         if [[ "$quiet" == false ]]; then
+            last_output="$output"
             if [[ "$output" != "WAITING" ]] && [[ -n "$output" ]]
             then
                 temp="${output//[^$'\n']/}"
