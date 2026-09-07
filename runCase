@@ -576,6 +576,8 @@ then
 fi
 
 # --- Aligned Setup Info ---
+echo "================================================================================"
+echo ""
 printf "[INFO]  %-25s : %s\n" "Case Folder" "$(basename "$(pwd)")"
 printf "[INFO]  %-25s : %s\n" "OpenFOAM Version" "$ofVersion"
 printf "[INFO]  %-25s : %s\n" "Solver" "$solver"
@@ -772,6 +774,21 @@ else
             }
         }
         
+        function format_time(seconds) {
+            if (seconds == "") return ""
+            seconds = int(seconds)
+            m = int(seconds / 60)
+            s = int(seconds % 60)
+            h = int(m / 60)
+            m = int(m % 60)
+            d = int(h / 24)
+            h = int(h % 24)
+            if (d > 0) return sprintf("%dd %dh %dm", d, h, m)
+            else if (h > 0) return sprintf("%02d:%02d:%02d", h, m, s)
+            else if (m > 0) return sprintf("00:%02d:%02d", m, s)
+            else return sprintf("00:00:%02d", s)
+        }
+        
         BEGIN { tc=0; dtc=0; ec=0; c_mean="N/A"; c_max="N/A"; ic_mean="N/A"; ic_max="N/A"; cap_num=""; }
         
         /^Time = / { t[tc++] = $3 }
@@ -827,8 +844,8 @@ else
                 else bar = bar "░"
             }
 
-            eh = int(curr_exec/3600); em = int((curr_exec%3600)/60); es = int(curr_exec%60)
-            th = int(eta_sec/3600); tm = int((eta_sec%3600)/60); ts = int(eta_sec%60)
+            elapsed_str = format_time(curr_exec)
+            eta_str = format_time(eta_sec)
 
             printf "Progress                 : %s %.1f%%\n", bar, prog
             printf "Time (t)                 : %s s\n", fmt(curr_t)
@@ -847,9 +864,9 @@ else
             }
             printf "Iteration Speed          : %.2f s/it\n", iter_speed
             if (speed > 0 && tc > 10) 
-                printf "Elapsed                  : %02d:%02d:%02d | ETA: %02d:%02d:%02d\n", eh, em, es, th, tm, ts
+                printf "Elapsed                  : %s | ETA: %s\n", elapsed_str, eta_str
             else 
-                printf "Elapsed                  : %02d:%02d:%02d | ETA: Calculating...\n", eh, em, es
+                printf "Elapsed                  : %s | ETA: Calculating...\n", elapsed_str
         }')
 
         if [[ "$quiet" == false ]]; then

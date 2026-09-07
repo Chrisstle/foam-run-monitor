@@ -476,7 +476,7 @@ def build_output(args):
                 out.append(f"Latest Saved Timestep    : {fmt(latest_saved)} s")
             
             c_count = cache['cells'] if cache['cells'] else (cell_count if cell_count != "Unknown" else "Unknown")
-            if c_count != "Unknown" or mesh_type == "Dynamic (AMR)":
+            if mesh_type == "Dynamic (AMR)":
                 try:
                     c_val = int(str(c_count).replace(' ', ''))
                     c_count_str = f"{c_val:,}".replace(",", " ")
