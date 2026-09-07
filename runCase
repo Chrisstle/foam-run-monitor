@@ -810,14 +810,30 @@ if [[ "$isBatch" == true ]]; then
         echo "[RUN]   Rendering animations for all batch cases..."
         
         if [[ ${#validCases[@]} -gt 0 ]]; then
+            # Determine the same output directory that animateCase will select.
+            # A single-case batch writes into the case directory; multi-case
+            # batches use the first available Animations, Animations 1, etc.
+            if [[ ${#validCases[@]} -eq 1 ]]; then
+                animationOutDir="${validCases[0]}"
+            else
+                animationOutDir="$(pwd)/Animations"
+                animationDirIndex=1
+                while [[ -e "$animationOutDir" ]]; do
+                    animationOutDir="$(pwd)/Animations $animationDirIndex"
+                    ((animationDirIndex++))
+                done
+            fi
+
             animateCase -P "$batchJobs" "${animArgs[@]}" "${validCases[@]}"
             
             # Rename crashed cases
             for i in "${!validCases[@]}"; do
                 if [[ "${states[$i]}" == 3 ]]; then
                     c_name=$(basename "${validCases[$i]}")
-                    if [[ -f "Animations/${c_name}.avi" ]]; then
-                        mv "Animations/${c_name}.avi" "Animations/${c_name}_Crashed.avi"
+                    animationFile="$animationOutDir/${c_name}.avi"
+                    crashedAnimationFile="$animationOutDir/${c_name}_Crashed.avi"
+                    if [[ -f "$animationFile" ]]; then
+                        mv -- "$animationFile" "$crashedAnimationFile"
                     fi
                 fi
             done
