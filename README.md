@@ -1,163 +1,383 @@
 # foam-run-monitor
 
-A collection of robust utility scripts designed to streamline the execution and active monitoring of OpenFOAM® simulations.
+Command-line utilities for running, monitoring, reconstructing, and visualizing OpenFOAM® simulations.
 
----
+The repository contains three scripts:
 
-## 1. runCase
+- `runCase` runs a single case or manages a batch of cases.
+- `monitorCase` finds active OpenFOAM processes and reports their progress.
+- `animateCase` renders one or more cases as ParaView animations.
 
-`runCase` is a robust bash script designed to streamline the execution and monitoring of OpenFOAM® simulations. It automatically handles solver detection, parallel decomposition, dynamic mesh tracking, and data reconstruction, wrapping it all in a clean, live-updating progress interface.
+## Contents
 
-### Features
-- **Smart Initialization**: Automatically reads `controlDict`, `decomposeParDict`, and `dynamicMeshDict` to determine the solver, execution mode (serial/parallel), target end time, and mesh type.
-- **Mesh Validation**: Runs a pre-flight `checkMesh` to ensure mesh validity before starting the solver.
-- **Active Monitoring**: Active monitoring of the case, similar in style as `monitorCase` (see examples below).
-- **Automated Reconstruction**: Automatically handles `reconstructParMesh` (if a dynamic mesh is used) followed by `reconstructPar` at the end of a parallel run, cleaning up processor directories upon success.
-- **Verified Reconstruction Cleanup**: Before removing processor data, verifies the reconstructed time set, object manifest, OpenFOAM file classes, refreshed outputs, and latest reconstructed mesh readability. Any uncertainty preserves the processor directories.
-- **Failsafe Mechanisms**: Gracefully intercepts `Ctrl+C` to cleanly kill background solvers. Skips cleanup if reconstruction or its verification encounters errors.
-- **Batch Processing & Job Pool**: Run multiple case directories sequentially or in parallel (`-P`). Features a native, live-updating TUI dashboard that tracks the status of all queued and active jobs.
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [runCase](#runcase)
+- [monitorCase](#monitorcase)
+- [animateCase](#animatecase)
+- [How the scripts work together](#how-the-scripts-work-together)
 
-### Usage
+## Requirements
+
+### OpenFOAM tools
+
+Load a working OpenFOAM environment before using `runCase`. Depending on the case and selected mode, the script calls:
+
+- the solver named by `application` in `system/controlDict`
+- `checkMesh`
+- `foamListTimes`
+- `setFields`
+- `decomposePar`
+- `reconstructPar` and, for dynamic meshes, `reconstructParMesh`
+- `mpirun` for parallel cases
+
+`runCase` treats a case as parallel when `system/decomposeParDict` exists and its `numberOfSubdomains` value is greater than one.
+
+### Python and Linux
+
+`monitorCase` and `animateCase` require Python 3. `monitorCase` discovers processes through Linux's `/proc` filesystem, so it is intended for Linux systems and can only inspect processes that the current user is permitted to read.
+
+### ParaView
+
+`animateCase` requires ParaView's `pvpython`. The script searches `PATH` and several common installation directories. Rendering also requires a working graphical or headless ParaView environment.
+
+## Installation
+
+Make the scripts executable:
+
 ```bash
-runCase [MODE] [OPTIONS]
-```
-Run it from your case directory (the directory containing `system`, `constant`, etc.), or from a root directory containing multiple cases to automatically trigger a batch process.
-
-#### Modes (Required)
-You must specify exactly one of the following modes to run the script:
-
-| Flag | Description |
-| :--- | :--- |
-| `-n, --new` | Starts a **new** simulation. Cleans the case directory, removing old logs, recognized OpenFOAM processor storage, and time directories. Signed and scientific-notation times are included in the confirmation check. |
-| `-c, --continue` | **Continues** an existing simulation from the `latestTime` available. |
-| `-r, --reconstruct`| Only performs **manual reconstruction** (`reconstructParMesh` & `reconstructPar`) on a stopped/completed parallel run without starting the solver. |
-| `-clean` | **Cleans** the case directory immediately. Deletes logs, recognized OpenFOAM processor storage, and time folders, resets the `0` directory from `0.orig` (if it exists), and runs `setFields`. Similarly named backups such as `processorBackup` are left untouched. |
-
-#### Options (Optional)
-| Flag | Description |
-| :--- | :--- |
-| `-np <number>` | Overrides the `numberOfSubdomains` parameter in `system/decomposeParDict` to use the specified `<number>` of processors. If running in batch mode, it updates the dictionary for *all* target cases before starting. |
-| `-P, --jobs <num>`| Number of concurrent jobs to run. Automatically enables batch execution mode (default: 1). **Note on Batch Mode:** Batch execution and recursive scanning are automatically triggered if you pass multiple positional arguments or if you run the script in a directory without a `system/controlDict` (e.g., a parametric study root). |
-| `-q, --quiet` | Suppresses the interactive terminal UI (TUI) and animations. Useful for `nohup`, `tmux`, or redirecting output to files. |
-| `-k, --keep-processors` | Always preserves decomposed processor data after successful reconstruction, bypassing automatic verification and cleanup. |
-| `-a, --animate` | Triggers `animateCase` automatically when the simulation completes (or collectively at the end of a batch). |
-| `-s, --fps, --res, --field` | Optional flags to pass directly to `animateCase` when using `-a`. (e.g. `--fps 5 -s custom.pvsm`) |
-| `-h, --help` | Show the help message and exit. |
-
-### Examples
-
-**Single Case:**
-```bash
-runCase -n -np 4
+chmod +x runCase monitorCase animateCase
 ```
 
-**Batch Processing:**
-If you run `runCase` from a root directory that doesn't have its own `system/controlDict`, it will automatically perform a recursive search (up to 3 directory levels deep) to find and queue all nested case directories.
+Either call them by their full paths or add this repository to your `PATH`. For example:
 
-To manually specify cases, you can pass them as arguments:
 ```bash
-runCase -n -P 2 case1 case3 case4
-```
-Or use wildcards to run all matching directories concurrently:
-```bash
-runCase -n -P 2 case*
-```
-*Note: In batch mode, a live dashboard will appear to track the status (Queued, Running, Done, Crashed) of each case.*
-
-![runCase Batch Dashboard](Images/runCase%20example2.png)
-
-**Comprehensive Pipeline:**
-Clean the directory, decompose for 3 cores, run 2 jobs in parallel over all nested cases in the current directory, and render customized animations at the end:
-```bash
-runCase --new -np 3 -P 2 --animate --fps 5 --state set_up.pvsm
+export PATH="$PATH:/path/to/foam-run-monitor"
 ```
 
-## Under the Hood
+If you use Bash, add that `export` line to `~/.bashrc` so it persists between terminal sessions. Then open a new terminal or reload the file:
+
+```bash
+source ~/.bashrc
+```
+
+## runCase
+
+`runCase` coordinates the normal OpenFOAM case lifecycle: optional cleanup, mesh checking, decomposition, solver execution, progress reporting, reconstruction, and optional animation rendering.
+
+Run it inside a case directory containing `system/controlDict`, or give it one or more case or parent directories to use batch mode.
+
+```bash
+runCase MODE [OPTIONS] [CASE_OR_PARENT ...]
+```
+
+### Execution sequence
+
+For a normal new or continued run, the sequence is:
+
+1. Determine whether this is a single-case or batch run and locate the target cases.
+2. Read `controlDict` and, if present, `decomposeParDict` and default- or region-level `dynamicMeshDict` files to identify the solver, end time, processor count, and mesh type.
+3. Run `checkMesh -time 0`, or reuse the existing `log/log.checkMesh` result.
+4. In new mode, ask before deleting existing results, then clean the case, restore `0` from `0.orig` when available, and run `setFields`.
+5. For a parallel case, run `decomposePar` if processor data does not already exist.
+6. Start the solver and display its progress until it finishes.
+7. For a parallel case, reconstruct the mesh when necessary, reconstruct the results, verify the reconstructed data, and only then remove processor data.
+8. If `--animate` was requested, call `animateCase` to render the result.
+
+Reconstruction mode skips solver execution and goes directly to step 7. Clean mode performs only the cleaning actions from step 4.
+
+### Modes
+
+Choose one mode for each invocation:
+
+| Mode | Behavior |
+| --- | --- |
+| `-n`, `--new` | Starts a fresh simulation. If old results are detected, asks before removing them. Removes time directories and decomposed data, restores `0` from `0.orig` when available, and runs `setFields`. |
+| `-c`, `--continue` | Runs the solver without deleting existing results. The actual starting point still follows `startFrom` in `system/controlDict`; use `startFrom latestTime` to resume the latest result. |
+| `-r`, `--reconstruct` | Reconstructs an existing parallel case without running the solver. |
+| `-clean` | Cleans the case immediately, restores `0` from `0.orig` when available, and runs `setFields`, but does not start the solver. |
+
+New and clean modes retain `log/log.checkMesh` while removing other files under `log/`.
+
+### Options
+
+| Option | Behavior |
+| --- | --- |
+| `-np N` | Sets `numberOfSubdomains` to `N` in `system/decomposeParDict`. This is the number of MPI ranks used **per case**. |
+| `-P N`, `--jobs N` | Runs up to `N` cases concurrently in batch mode. The default is one case at a time. |
+| `-q`, `--quiet` | Hides live progress displays and spinners. Commands still run, confirmation prompts still appear, and `--animate` still renders when requested. |
+| `-k`, `--keep-processors` | Keeps decomposed processor data after reconstruction, even when reconstruction verification succeeds. |
+| `-a`, `--animate` | Calls `animateCase` after a successful single-case run or after the batch manager finishes. |
+| `-s FILE`, `--state FILE` | Passes a ParaView state file to `animateCase`; meaningful with `--animate`. |
+| `--fps N` | Passes the animation frame rate to `animateCase`. |
+| `--res W H` | Passes the animation resolution to `animateCase`. |
+| `--field NAME` | Passes the field selection to `animateCase` when no state file is used. |
+| `-h`, `--help` | Shows command-line help. |
+
+`-np` and `-P` control different forms of parallelism. For example, the following runs two cases at once, with eight MPI ranks assigned to each case:
+
+```bash
+runCase --new -np 8 -P 2 case1 case2 case3
+```
+
+### Single-case execution
+
+Start a case from scratch on eight MPI ranks:
+
+```bash
+cd /path/to/case
+runCase --new -np 8
+```
+
+During execution, the display shows case configuration, simulation progress, the current and saved time, timestep size, Courant numbers, iteration speed, elapsed time, and estimated time remaining. Dynamic-mesh cases also show the latest detected cell count.
+
+![Single-case runCase progress display](Images/runCase%20example.png)
+
+### Mesh checking
+
+Before solver execution, `runCase` runs `checkMesh -time 0` if `log/log.checkMesh` does not already exist. It displays the cached or newly calculated status and initial cell count. A failed status is reported but does not automatically prevent the solver from starting, so inspect `log/log.checkMesh` when the mesh is not marked `OK`.
+
+### Parallel execution and reconstruction
+
+For a parallel case, `runCase`:
+
+1. Runs `decomposePar` when no recognized OpenFOAM processor storage exists.
+2. Starts the solver with `mpirun -np N ... -parallel`.
+3. Runs `reconstructParMesh` first when a non-static `dynamicFvMesh` is detected, including region-level dynamic mesh dictionaries.
+4. Reconstructs every region in a multi-region case when the installed OpenFOAM tools support it.
+5. Runs `reconstructPar` and verifies the reconstructed data.
+6. Removes processor directories only when every verification layer succeeds.
+
+If reconstruction fails or the installed OpenFOAM version cannot safely reconstruct or verify every region, the processor data is preserved and the relevant reconstruction log is reported.
+
+### Cleanup and reconstruction safety
+
+New-mode confirmation uses `foamListTimes`, so signed, decimal, and scientific-notation time directories are detected consistently with OpenFOAM. Batch deletion approval applies only to the cases named in the warning; if data appears in another case while it is queued, that case stops without deleting anything.
+
+`--new` asks for confirmation when existing results are found. In contrast, `-clean` is an explicit immediate-clean command and does not prompt, so use it only when removal is intended.
+
+Cleanup removes only recognized OpenFOAM processor names, such as `processor0` or collated `processors8`, and leaves similarly named paths such as `processorBackup`, `processor0.old`, and `processors_archive` untouched.
+
+After reconstruction, `runCase` compares processor and reconstructed time/object manifests, checks file headers and refreshed outputs, and asks `checkMesh` to read the latest reconstructed mesh. Multi-region verification uses `checkMesh -allRegions` where available and falls back to checking each region separately for versions such as OpenFOAM Foundation v10. Processor storage is deleted only after all checks succeed. Use `--keep-processors` to retain it unconditionally.
+
+### Batch execution
+
+Batch mode is enabled when:
+
+- one or more case or parent directories are supplied as positional arguments;
+- `-P` or `--jobs` is supplied; or
+- `runCase` is launched from a directory that does not contain `system/controlDict`.
+
+A supplied case directory is queued directly. A supplied parent directory is searched for cases containing `system/controlDict`; the current implementation recognizes cases within two nested directory levels. Duplicate paths are removed before execution.
+
+For example, consider a study directory with the following layout:
+
+```text
+study/
+├── case_01/
+│   └── system/controlDict
+├── case_02/
+│   └── system/controlDict
+└── variants/
+    └── case_03/
+        └── system/controlDict
+```
+
+Running the following from `study/` automatically searches the current directory, discovers all three cases, and queues them without requiring the case names individually:
+
+```bash
+cd /path/to/study
+runCase --new -P 2
+```
+
+You can also pass the parent directory explicitly from somewhere else:
+
+```bash
+runCase --continue -P 2 /path/to/study
+```
+
+In both examples, `-P 2` allows two discovered cases to run concurrently. The search happens automatically; shell wildcards are optional.
+
+Run three selected cases, two at a time:
+
+```bash
+runCase --new -P 2 case1 case3 case4
+```
+
+Use shell expansion to select cases:
+
+```bash
+runCase --continue -P 3 case_*
+```
+
+The batch manager asks for confirmation, then displays whether each case is queued, running, done, or crashed. In new mode, cleanup approval is tracked per case rather than applied to the entire queue.
+
+![runCase batch manager](Images/runCase%20example2.png)
+
+To run a complete batch and render the cases afterward:
+
+```bash
+runCase --new -np 3 -P 2 --animate --fps 5 --state setup.pvsm
+```
+
+In this example, each case uses three MPI ranks, at most two cases run concurrently, and `animateCase` uses two concurrent rendering jobs after the simulations finish.
+
+When `--animate` is used in batch mode, `runCase` attempts to render every case, including cases marked as crashed. A video produced for a crashed case is renamed from `<case-name>.avi` to `<case-name>_Crashed.avi` in the animation output directory so incomplete-run animations are easy to identify. If that name already exists, a numbered name such as `<case-name>_Crashed_1.avi` is used instead of overwriting the earlier artifact.
 
 ### Logs
-`runCase` quietly redirects all standard OpenFOAM® outputs into a generated `log/` directory. You can inspect these if something goes wrong:
-- `log/log.checkMesh`
-- `log/log.decomposePar`
-- `log/log.run` (The main solver output)
-- `log/log.reconstructParMesh`
-- `log/log.reconstructPar`
 
-### Dynamic Mesh Handling
-If `dynamicFvMesh` (e.g., Adaptive Mesh Refinement) is detected in `constant/dynamicMeshDict`:
-1. `monitorCase` and `runCase` will dynamically display current cell counts by parsing the solver output.
-2. During reconstruction, `runCase` automatically executes `reconstructParMesh`
-before `reconstructPar`.
-3. Processor storage is removed only after reconstruction exits successfully and
-the reconstructed times, objects, headers, and latest mesh pass verification.
-Use `--keep-processors` to retain processor data unconditionally.
-Multi-region cases are reconstructed with `-allRegions` when that option is
-reported by the installed OpenFOAM commands. Verification uses `checkMesh -allRegions`
-where available and otherwise checks each discovered region with
-`checkMesh -region`, as required by versions such as OpenFOAM Foundation v10.
-If the installed version cannot provide safe all-region reconstruction or
-verification, processor data is kept.
+Runtime output is stored under each case's `log/` directory. Depending on the selected workflow, files can include:
 
----
+```text
+log/log.checkMesh
+log/log.setFields
+log/log.decomposePar
+log/log.run
+log/log.reconstructParMesh
+log/log.reconstructPar
+log/log.animateCase
+log/.batch_worker.log
+log/.batch_stage
+```
 
-## 2. monitorCase
+The main solver output is written to `log/log.run`.
 
-`monitorCase` is a Python-based utility that monitors one or multiple active OpenFOAM® simulations simultaneously from anywhere in your filesystem. 
+### Interrupts and failures
 
-### Features
-- **Global Monitoring**: Automatically detects all running OpenFOAM® processes on your machine.
-- **TUI Dashboard**: Features a native Terminal User Interface (TUI) allowing you to seamlessly scroll through multiple active cases.
-- **Agnostic Log Parsing**: Traces OS-level file descriptors to find log files, making it completely immune to varying log names, locations, or standard output redirections (e.g. `tee` or `mpirun` wrappers).
-- **Dynamic Caching**: Actively caches metrics like iteration speed and Courant numbers to ensure the UI stays solid when polling between sequential solver output updates.
+`runCase` handles Ctrl+C and termination signals while decomposition, solver execution, or reconstruction is active. It asks the relevant background process to terminate. In batch mode, failed cases are shown as `Crashed`; inspect each case's logs for the cause. Crashed cases are not retried automatically.
 
-### Usage
+At present, the batch manager itself exits with status zero after reaching its summary, even when individual cases are marked as crashed. Account for that behavior if `runCase` is called from another automation script.
+
+## monitorCase
+
+`monitorCase` searches for active OpenFOAM solvers and selected OpenFOAM utilities, groups their processes by case, and reports their progress. It can be launched from any directory.
+
 ```bash
 monitorCase [OPTIONS]
 ```
 
-| Flag | Description |
-| :--- | :--- |
-| *(None)* | Prints a static, minimalistic one-time summary of all running simulations. |
-| `-m, --monitor` | Launches an interactive, live-updating TUI dashboard (similar to `htop`). Supports scrolling. Press `q` to exit. |
-| `-f, --full` | Expands the output to display comprehensive details mimicking `runCase`, including Courant numbers, mesh types, and ETA. |
-| `-h, --help` | Show the help message and exit. |
+| Option | Behavior |
+| --- | --- |
+| No options | Prints one compact snapshot and exits. |
+| `-m`, `--monitor` | Opens a continuously updating terminal interface. |
+| `-f`, `--full` | Shows detailed case and solver metrics. |
+| `-m -f`, `-mf` | Shows the detailed view continuously. The combined short form `-mf` is equivalent to `-m -f`. |
+| `-h`, `--help` | Shows command-line help. |
 
-### Examples
+### Compact view
 
-**Standard Monitoring Dashboard:**
-![monitorCase](Images/monitorCase.png)
+The compact view shows case names, elapsed time, ETA, current time, target end time, progress, and timestep size when those values are available.
 
-**Full Monitoring Dashboard (`-f`):**
-![monitorCase full](Images/monitorCase%20full.png)
-
----
-
-## 3. animateCase
-
-`animateCase` is a Python-based utility wrapping ParaView's `pvpython` API that automates rendering OpenFOAM cases into animations locally.
-
-### Features
-- **Intelligent State File Parsing:** Supports ParaView state files (`.pvsm`). It automatically reads the XML to find the registered name of the OpenFOAM reader proxy and swaps the file paths for each new case seamlessly.
-- **Automated Directory Handling:** Creates `.foam` dummy files automatically.
-- **Batch Processing with Wildcards:** Takes a list of OpenFOAM case directories using shell expansion (e.g. `animateCase case*`). It also supports recursive case discovery if you provide a root directory or no arguments at all!
-- **Parallel Processing:** Use the `-P` flag to spawn multiple `pvpython` subprocesses and render multiple videos concurrently.
-- **Smart Output Targeting:** Renders directly into the case directory for single cases, and generates an `Animations` folder to group the outputs for batch rendering.
-
-### Usage
 ```bash
-animateCase [options] [cases...]
+monitorCase -m
 ```
 
-#### Options
-| Flag | Description |
-| :--- | :--- |
-| `-s, --state <file.pvsm>` | Use a state file instead of the default `alpha.water` visualization. |
-| `-f, --fps <int>` | Framerate (default 15). |
-| `--res <w> <h>` | Resolution width and height (default 1280 720). |
-| `--field <name>` | Field to focus on (default `alpha.water`). |
-| `-P, --jobs <int>` | Number of parallel jobs (default 1). |
-| `-h, --help` | Show the help message and exit. |
+![Compact monitorCase dashboard](Images/monitorCase.png)
 
-*Note: The default settings for `animateCase` (like framerate, resolution, format) can be easily changed by editing the global variables at the very top of the `animateCase` python script file.*
+### Full view
 
+The full view adds solver and execution information, mesh details, saved time, dynamic cell counts, Courant numbers, capillary number, and iteration speed when the corresponding information is available in the case or solver log.
+
+```bash
+monitorCase -mf
+```
+
+![Full monitorCase dashboard](Images/monitorCase%20full.png)
+
+In monitor mode, use Up/Down or Page Up/Page Down to scroll. Press `q`, `Q`, or Ctrl+C to exit.
+
+### Process and log detection
+
+A process is recognized when its working directory contains `system/controlDict` and its executable:
+
+- matches the `application` entry in `controlDict`;
+- ends in `Foam`;
+- is a recognized decomposition or reconstruction utility; or
+- contains a name configured in `CUSTOM_SOLVERS` near the top of `monitorCase`.
+
+The monitor first looks through process file descriptors for an active log. If that does not find one, it searches recently modified files inside the case and checks for standard OpenFOAM time output. This supports many log names and redirection arrangements, but readable processes and recognizable OpenFOAM log lines are still required.
+
+ETA, iteration speed, Courant numbers, capillary number, and dynamic cell counts are estimates or parsed values based on recent log output. A value may temporarily appear as `N/A`, `Unknown`, or `Calculating...` until enough data is available.
+
+## animateCase
+
+`animateCase` uses ParaView's Python interface to render one or more OpenFOAM cases as AVI files.
+
+```bash
+animateCase [OPTIONS] [CASE_OR_PARENT ...]
+```
+
+With no case argument, the current directory is used. If an argument contains `system/controlDict`, it is treated as a case. Otherwise, that directory is searched recursively for cases.
+
+### Options
+
+| Option | Behavior |
+| --- | --- |
+| `-s FILE`, `--state FILE` | Loads a ParaView `.pvsm` state and redirects its first registered `OpenFOAMReader` to each case. |
+| `-f N`, `--fps N` | Sets the frame rate. Default: `15`. |
+| `--res W H` | Sets the output resolution. Default: `1280 720`. |
+| `--field PATTERN` | Selects the field used by the built-in visualization. Wildcards are accepted. Default: `alpha.*`. Ignored when a state file is supplied. |
+| `-P N`, `--jobs N` | Runs up to `N` `pvpython` render processes concurrently. Default: `1`. |
+| `-h`, `--help` | Shows command-line help. |
+
+The default frame rate, resolution, field pattern, and output format are easy to customize by changing `DEFAULT_FPS`, `DEFAULT_RESOLUTION`, `DEFAULT_FIELD`, and `DEFAULT_FORMAT` at the top of the `animateCase` script.
+
+### Built-in visualization
+
+Without a state file, the generated ParaView scene:
+
+- loads `internalMesh`;
+- displays its surface;
+- colors cells by the requested field;
+- selects the first matching field when a wildcard is used;
+- uses a white background and a `0–1` color range;
+- displays a scalar bar and simulation-time annotation; and
+- fits the camera to the case.
+
+Render the current case using the default field pattern:
+
+```bash
+animateCase
+```
+
+Render a specific field at 1920×1080 and 30 frames per second:
+
+```bash
+animateCase --field U --res 1920 1080 --fps 30
+```
+
+Render several cases with a saved ParaView state, two at a time:
+
+```bash
+animateCase --state setup.pvsm -P 2 case1 case2 case3
+```
+
+For multiple cases, `animateCase` displays the discovered case list and settings and asks for confirmation before rendering.
+
+### Output locations
+
+- A single case is written as `<case-directory>/<case-name>.avi`.
+- Multiple cases are written as `<current-directory>/Animations/<case-name>.avi`.
+- If `Animations` already exists, a new directory such as `Animations 1` or `Animations 2` is created instead of overwriting it.
+
+The script creates the `<case-name>.foam` reader file automatically when needed.
+
+## How the scripts work together
+
+A typical workflow is:
+
+```text
+runCase --new or --continue
+        |
+        +-- check/decompose/run/reconstruct
+        |
+        +-- monitorCase can observe the active solver separately
+        |
+        +-- runCase --animate invokes animateCase after completion
+```
+
+Use `runCase` when you want the complete execution lifecycle, `monitorCase` when simulations are already running, and `animateCase` when results are ready to visualize.
+
+---
 
 <sub>*OPENFOAM® is a registered trade mark of OpenCFD Limited, producer and distributor of the OpenFOAM software via www.openfoam.com. This offering is not approved or endorsed by OpenCFD Limited.*</sub>
