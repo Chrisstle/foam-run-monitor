@@ -25,7 +25,7 @@ Load a working OpenFOAM environment before using `runCase`. Depending on the cas
 
 - the solver named by `application` in `system/controlDict`
 - `checkMesh`
-- `foamListTimes`
+- `foamListTimes` and `foamDictionary`
 - `setFields`
 - `decomposePar`
 - `reconstructPar` and, for dynamic meshes, `reconstructParMesh`
@@ -35,7 +35,7 @@ Load a working OpenFOAM environment before using `runCase`. Depending on the cas
 
 ### Python and Linux
 
-`monitorCase` and `animateCase` require Python 3. `monitorCase` discovers processes through Linux's `/proc` filesystem, so it is intended for Linux systems and can only inspect processes that the current user is permitted to read.
+`runCase` requires Python 3.9+ and Linux `flock` (util-linux). `monitorCase` and `animateCase` also require Python 3. `monitorCase` discovers processes through Linux's `/proc` filesystem, so it is intended for Linux systems and can only inspect processes that the current user is permitted to read.
 
 ### ParaView
 
@@ -77,8 +77,8 @@ For a normal new or continued run, the sequence is:
 
 1. Determine whether this is a single-case or batch run and locate the target cases.
 2. Read `controlDict` and, if present, `decomposeParDict` and default- or region-level `dynamicMeshDict` files to identify the solver, end time, processor count, and mesh type.
-3. Run `checkMesh -time 0`, or reuse the existing `log/log.checkMesh` result.
-4. In new mode, ask before deleting existing results, then clean the case, restore `0` from `0.orig` when available, and run `setFields`.
+3. Validate the case, acquire a case lock, and run a fresh mesh check. Continued parallel cases check the processor mesh at the latest time; fresh runs check time zero.
+4. In new mode, ask before deleting existing results, then clean the case, restore `0` from `0.orig` when available, and run `setFields` when `system/setFieldsDict` exists.
 5. For a parallel case, run `decomposePar` if processor data does not already exist.
 6. Start the solver and display its progress until it finishes.
 7. For a parallel case, reconstruct the mesh when necessary, reconstruct the results, verify the reconstructed data, and only then remove processor data.
@@ -92,10 +92,10 @@ Choose one mode for each invocation:
 
 | Mode | Behavior |
 | --- | --- |
-| `-n`, `--new` | Starts a fresh simulation. If old results are detected, asks before removing them. Removes time directories and decomposed data, restores `0` from `0.orig` when available, and runs `setFields`. |
-| `-c`, `--continue` | Runs the solver without deleting existing results. The actual starting point still follows `startFrom` in `system/controlDict`; use `startFrom latestTime` to resume the latest result. |
+| `-n`, `--new` | Starts a fresh simulation. If old results are detected, asks before removing them. Removes time directories and decomposed data, restores `0` from `0.orig` when available, and runs `setFields` if configured. |
+| `-c`, `--continue` | Runs the solver without deleting existing results. Requires `startFrom latestTime`, consistent processor times/ranks, initialized restart fields, and an `endTime` later than the restart time. Invalid continuation fails before mutation. |
 | `-r`, `--reconstruct` | Reconstructs an existing parallel case without running the solver. |
-| `-clean` | Cleans the case immediately, restores `0` from `0.orig` when available, and runs `setFields`, but does not start the solver. |
+| `-clean`, `--clean` | Confirms cleanup (or requires `--allow-clean` in non-interactive mode), restores `0` from `0.orig` when available, and runs `setFields` if configured, but does not start the solver. |
 
 New and clean modes retain `log/log.checkMesh` while removing other files under `log/`.
 
@@ -103,7 +103,8 @@ New and clean modes retain `log/log.checkMesh` while removing other files under 
 
 | Option | Behavior |
 | --- | --- |
-| `-np N` | Sets `numberOfSubdomains` to `N` in `system/decomposeParDict`. This is the number of MPI ranks used **per case**. |
+| `-np N`, `--np N` | Sets `numberOfSubdomains` to `N` in `system/decomposeParDict`. This is the number of MPI ranks used **per case**. |
+| `-b`, `--batch` | Explicitly enables batch discovery. |
 | `-P N`, `--jobs N` | Runs up to `N` cases concurrently in batch mode. The default is one case at a time. |
 | `-q`, `--quiet` | Hides live progress displays and spinners. Commands still run, confirmation prompts still appear, and `--animate` still renders when requested. |
 | `-k`, `--keep-processors` | Keeps decomposed processor data after reconstruction, even when reconstruction verification succeeds. |
@@ -112,6 +113,11 @@ New and clean modes retain `log/log.checkMesh` while removing other files under 
 | `--fps N` | Passes the animation frame rate to `animateCase`. |
 | `--res W H` | Passes the animation resolution to `animateCase`. |
 | `--field NAME` | Passes the field selection to `animateCase` when no state file is used. |
+| `--non-interactive` | Never prompts; missing cleanup approval fails immediately. Ordinary batch execution proceeds without a final question. |
+| `--allow-clean` | Explicitly approves destructive cleanup in `--new` or `--clean` mode only. |
+| `--plan`, `--dry-run` | Validates and prints intended actions without changing files, running mesh checks, or starting solvers. |
+| `--format=json` | Emits a JSON plan, or one JSON object per line for batch plans. Requires `--plan`. |
+| `--version`, `--capabilities` | Reports script/interface versions or JSON automation capabilities and exit codes. |
 | `-h`, `--help` | Shows command-line help. |
 
 `-np` and `-P` control different forms of parallelism. For example, the following runs two cases at once, with eight MPI ranks assigned to each case:
@@ -119,6 +125,69 @@ New and clean modes retain `log/log.checkMesh` while removing other files under 
 ```bash
 runCase --new -np 8 -P 2 case1 case2 case3
 ```
+
+### Automation interface (version 1)
+
+```bash
+runCase --continue --plan --format=json
+runCase --continue --non-interactive --quiet
+runCase --new --non-interactive --allow-clean --quiet
+runCase --version
+runCase --capabilities
+```
+
+Plans report solver, ranks, restart/end times, decomposition, reconstruction,
+cleanup, required approval, and lock availability. A plan with
+`requiresConfirmation: true` describes a valid operation that still needs
+explicit cleanup approval; it does not grant that approval. Batch JSON plans
+are JSON Lines (one object per discovered case). Errors go to stderr as
+`RUNCASE_ERROR=NAME: explanation`; case-validation failures in JSON plan mode
+also produce a JSON error object. Plans never apply `--np` or acquire a durable
+lock, and do not perform mesh or solver checks.
+
+Dictionary queries disable OpenFOAM function entries to keep planning free of
+side effects. Values supplied only through `#include`, `#calc`, `#codeStream`,
+or other unresolved directives must be resolved before using this interface.
+Continuation conservatively checks the field inventory from `0`, `0.orig`,
+and processor `0` directories; it cannot infer arbitrary solver-specific
+requirements. Missing initial inventories fail explicitly. Restart field
+headers and filenames are checked, not every field's numerical contents.
+Uncollated `processor0..N-1` and single `processorsN` collated layouts are
+supported for continuation; split/legacy collated layouts fail for review.
+
+A case-local kernel lock at `.runCase/lock` prevents concurrent **runCase**
+invocations. It does not discover solvers launched through other tools, so
+check those separately. Keep the lock file in place: the kernel releases
+ownership automatically on exit, so a stale file is safe to reuse. The small,
+atomically replaced `.runCase/last-run.json` receipt records the process,
+hostname, command, start/update timestamps, solver, ranks, restart time,
+log path, completion state and exit status. A receipt left as `running`
+after a forced kill is historical evidence, not proof that a process is alive.
+The receipt is written only after a launch owns the lock; rejected preflight
+attempts preserve the preceding receipt.
+
+| Status | Meaning |
+| ---: | --- |
+| 0 | Success |
+| 2 | Invalid arguments |
+| 10 | Confirmation needed, declined, or unavailable |
+| 11 | Cleanup approval required / queued data appeared |
+| 12 | Invalid continuation |
+| 13 | Case lock already held |
+| 14 | Invalid decomposition or failed decomposition command |
+| 15 | Missing environment, invalid case/dictionary, preparation or animation failure |
+| 20 | Mesh check failed |
+| 30 | Solver failed (underlying status appears in the error) |
+| 40 | Reconstruction, verification, or verified cleanup failed |
+| 50 | One or more batch jobs / batch animation failed |
+| 130 / 143 | Active single-case child interrupted by SIGINT / SIGTERM |
+
+Use `--non-interactive` for unattended batch runs. Multi-case `--animate`
+still needs the separate renderer's confirmation and is rejected up front in
+non-interactive mode; render separately. `--jobs` counts cases, not cores:
+choose concurrency from each case's rank count. For a 14-core budget, two
+8-rank jobs must run sequentially. The script remains a foreground command;
+a service manager can own it for persistent unattended execution.
 
 ### Single-case execution
 
@@ -135,13 +204,13 @@ During execution, the display shows case configuration, simulation progress, the
 
 ### Mesh checking
 
-Before solver execution, `runCase` runs `checkMesh -time 0` if `log/log.checkMesh` does not already exist. It displays the cached or newly calculated status and initial cell count. A failed status is reported but does not automatically prevent the solver from starting, so inspect `log/log.checkMesh` when the mesh is not marked `OK`.
+Before each solver run, `runCase` checks the current mesh and replaces `log/log.checkMesh`. Fresh runs check time zero. Continuations check `-latestTime`, using `mpirun ... checkMesh -parallel` when processor storage exists. Multi-region cases request `-allRegions`. A failed command or missing `Mesh OK` result stops execution with status 20; cached success never bypasses this check.
 
 ### Parallel execution and reconstruction
 
 For a parallel case, `runCase`:
 
-1. Runs `decomposePar` when no recognized OpenFOAM processor storage exists.
+1. Runs `decomposePar` when no recognized processor storage exists, adding `-latestTime` for continuation. Existing storage must match the configured ranks.
 2. Starts the solver with `mpirun -np N ... -parallel`.
 3. Runs `reconstructParMesh` first when a non-static `dynamicFvMesh` is detected, including region-level dynamic mesh dictionaries.
 4. Reconstructs every region in a multi-region case when the installed OpenFOAM tools support it.
@@ -154,7 +223,7 @@ If reconstruction fails or the installed OpenFOAM version cannot safely reconstr
 
 New-mode confirmation uses `foamListTimes`, so signed, decimal, and scientific-notation time directories are detected consistently with OpenFOAM. Batch deletion approval applies only to the cases named in the warning; if data appears in another case while it is queued, that case stops without deleting anything.
 
-`--new` asks for confirmation when existing results are found. In contrast, `-clean` is an explicit immediate-clean command and does not prompt, so use it only when removal is intended.
+`--new` asks for confirmation when existing results are found; `--clean` always asks. `--non-interactive` turns required approval into an immediate error. Add `--allow-clean` only when deletion is intended. `--quiet` suppresses the display and never approves deletion. The legacy private `--force-new` alias remains an explicit cleanup approval for compatibility.
 
 Cleanup removes only recognized OpenFOAM processor names, such as `processor0` or collated `processors8`, and leaves similarly named paths such as `processorBackup`, `processor0.old`, and `processors_archive` untouched.
 
@@ -210,7 +279,7 @@ Use shell expansion to select cases:
 runCase --continue -P 3 case_*
 ```
 
-The batch manager asks for confirmation, then displays whether each case is queued, running, done, or crashed. In new mode, cleanup approval is tracked per case rather than applied to the entire queue.
+The batch manager asks for confirmation unless `--non-interactive` was supplied, then displays whether each case is queued, running, done, or crashed. In new mode, cleanup approval is tracked per case rather than applied to the entire queue.
 
 ![runCase batch manager](Images/runCase%20example2.png)
 
@@ -246,7 +315,7 @@ The main solver output is written to `log/log.run`.
 
 `runCase` handles Ctrl+C and termination signals while decomposition, solver execution, or reconstruction is active. It asks the relevant background process to terminate. In batch mode, failed cases are shown as `Crashed`; inspect each case's logs for the cause. Crashed cases are not retried automatically.
 
-At present, the batch manager itself exits with status zero after reaching its summary, even when individual cases are marked as crashed. Account for that behavior if `runCase` is called from another automation script.
+The batch manager returns status 50 if any case failed. Independent cases continue through the queue. Each worker has its own lock, receipt, and logs.
 
 ## monitorCase
 
@@ -381,3 +450,17 @@ Use `runCase` when you want the complete execution lifecycle, `monitorCase` when
 ---
 
 <sub>*OPENFOAM® is a registered trade mark of OpenCFD Limited, producer and distributor of the OpenFOAM software via www.openfoam.com. This offering is not approved or endorsed by OpenCFD Limited.*</sub>
+
+## Testing runCase
+
+From the repository, with OpenFOAM v2512 sourced:
+
+```bash
+python3 tests/test_runCase_interface.py
+bash tests/test_runCase_reconstruction_safety.sh
+```
+
+Tests create temporary cases. Interface tests use real OpenFOAM dictionary/time
+utilities and stub expensive solver commands. Reconstruction tests stub the
+OpenFOAM tools to exercise missing/stale outputs, collated and multi-region
+reconstruction, cleanup boundaries, queued-data races, and failed batches.

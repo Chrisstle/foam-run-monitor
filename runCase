@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 # 1. Setup and Solver Detection
 # -----------------------------------------------------------------------------
-if [[ "$quiet" == false ]]; then clear; fi
+
 
 mode=""
 customNP=""
@@ -16,9 +16,68 @@ isBatch=false
 batchJobs=1
 batchCases=()
 originalArgs=()
+invocationArgs=("$@")
 animate=false
 animArgs=()
 keepProcessors=false
+nonInteractive=false
+allowClean=false
+planOnly=false
+outputFormat=text
+RUNCASE_VERSION=2.0.0
+RUNCASE_INTERFACE_VERSION=1
+scriptPath=$(readlink -f -- "${BASH_SOURCE[0]}")
+errorSymbol=""
+receiptActive=false
+
+fail() {
+    local code="$1" symbol="$2"; shift 2
+    errorSymbol="$symbol"
+    if [[ "$planOnly" == true && "$outputFormat" == json ]]; then
+        python3 - "$symbol" "$code" "$*" <<'PYJSON'
+import json, os, sys
+print(json.dumps(dict(ok=False, error=sys.argv[1], exitCode=int(sys.argv[2]), message=sys.argv[3], case=os.getcwd())))
+PYJSON
+    fi
+    printf 'RUNCASE_ERROR=%s: %s\nCase: %s\n' "$symbol" "$*" "$PWD" >&2
+    exit "$code"
+}
+
+interrupt_batch() {
+    local code="$1" pid
+    if [[ "$quiet" == false ]]; then
+        stty echo 2>/dev/null || true
+        tput rmcup 2>/dev/null || true
+        printf '\033[?25h\033[?7h'
+    fi
+    for pid in "${pids[@]}"; do
+        [[ -z "$pid" ]] || kill -TERM "$pid" 2>/dev/null || true
+    done
+    for pid in "${pids[@]}"; do
+        [[ -z "$pid" ]] || wait "$pid" 2>/dev/null || true
+    done
+    fail "$code" INTERRUPTED "Batch interrupted; active workers were asked to stop."
+}
+
+interrupt_child() {
+    local code="$1" child="$2"
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "$code" INTERRUPTED "Run interrupted; existing processor data was preserved."
+}
+
+set_mode() {
+    [[ -z "$mode" || "$mode" == "$1" ]] || fail 2 INVALID_ARGUMENTS "Choose exactly one mode; got $mode and $1."
+    mode="$1"
+}
+
+confirm_action() {
+    local code="$1" symbol="$2" message="$3" reply
+    [[ "$nonInteractive" == false ]] || fail "$code" "$symbol" "$message"
+    read -r -p "$message [y/N]: " reply || fail 10 CONFIRMATION_REQUIRED "$message (no input available)"
+    [[ "$reply" =~ ^[yY]([eE][sS])?$ ]] || fail 10 CANCELLED "$message (declined)"
+}
+
 
 # Reconstruction verification state. These are populated immediately before
 # reconstructPar starts. Processor data is removed only if the same storage
@@ -526,13 +585,13 @@ remove_verified_processor_dirs() {
 
     for processorDir in "${reconstructionProcessorDirs[@]}"; do
         if [[ ! -d "$processorDir" || -L "$processorDir" ]]; then
-            echo "[WARN]  Processor storage changed before cleanup; preserving all remaining data."
+            echo "[WARN]  Processor storage changed before cleanup; preserving all remaining data." >&2
             return 1
         fi
     done
 
     cleanupStage=$(mktemp -d .runCase-processor-cleanup.XXXXXX) || {
-        echo "[ERROR] Could not create the processor cleanup staging directory."
+        echo "[ERROR] Could not create the processor cleanup staging directory." >&2
         return 1
     }
 
@@ -543,7 +602,7 @@ remove_verified_processor_dirs() {
         if mv -- "$processorDir" "$cleanupStage/$processorName"; then
             movedProcessorDirs+=("$processorName")
         else
-            echo "[ERROR] Could not stage '$processorDir' for cleanup; rolling back."
+            echo "[ERROR] Could not stage '$processorDir' for cleanup; rolling back." >&2
             for movedDir in "${movedProcessorDirs[@]}"; do
                 mv -- "$cleanupStage/$movedDir" "./$movedDir" 2>/dev/null || true
             done
@@ -553,12 +612,177 @@ remove_verified_processor_dirs() {
     done
 
     if ! rm -rf -- "$cleanupStage"; then
-        echo "[ERROR] Could not fully remove verified processor data."
+        echo "[ERROR] Could not fully remove verified processor data." >&2
         echo "        Any remaining data is preserved under '$cleanupStage'."
         return 1
     fi
 
     return 0
+}
+
+# Read-only preflight. Python handles numeric times and JSON; OpenFOAM reads
+# dictionaries with function entries disabled, so plans cannot execute code.
+preflight() {
+    python3 - "$mode" "$customNP" "$allowClean" "$keepProcessors" "$outputFormat" "${receiptActive:-false}" <<'PY'
+import json, math, os, re, shutil, subprocess, sys
+from pathlib import Path
+mode, override, allow, keep, fmt, owns_lock = sys.argv[1:]
+root = Path.cwd()
+plan = dict(interfaceVersion=1, case=str(root), mode=mode, ok=False,
+            requiresConfirmation=False, warnings=[])
+def die(code, symbol, message):
+    plan.update(error=symbol, message=message, exitCode=code)
+    if fmt == 'json': print(json.dumps(plan))
+    print(f'RUNCASE_ERROR={symbol}: {message}\nCase: {root}', file=sys.stderr)
+    sys.exit(code)
+def value(path, entry):
+    if not shutil.which('foamDictionary'):
+        die(15, 'ENVIRONMENT_MISSING', 'Source OpenFOAM: foamDictionary is unavailable.')
+    result = subprocess.run(['foamDictionary', str(path), '-disableFunctionEntries', '-entry', entry, '-value'],
+                            capture_output=True, text=True)
+    if result.returncode:
+        die(15, 'INVALID_DICTIONARY', f'Cannot read {entry} from {path} with function entries disabled; resolve included/generated values first. {result.stderr.strip()}')
+    answer = result.stdout.strip().rstrip(';')
+    if '#' in answer or '$' in answer:
+        die(15, 'INVALID_DICTIONARY', f'{path}:{entry} requires executable or unexpanded dictionary entries. Provide a resolved value before running runCase.')
+    return answer
+def times(path):
+    result = []
+    for d in path.iterdir():
+        if d.is_dir() and re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', d.name):
+            n = float(d.name)
+            if math.isfinite(n): result.append((n, d.name))
+    return sorted(result)
+def fields(path):
+    # Inventory all initialized volume/surface/point fields, including regions.
+    result = set()
+    if not path.is_dir(): return result
+    import gzip
+    for f in path.rglob('*'):
+        if not f.is_file() or f.is_symlink() or 'polyMesh' in f.parts: continue
+        try:
+            opener = gzip.open if f.suffix == '.gz' else open
+            with opener(f, 'rb') as stream: header = stream.read(16384)
+        except OSError: continue
+        if re.search(rb'\bclass\s+(?:vol|surface|point)\w*Field\s*;', header):
+            result.add(str(f.relative_to(path)).removesuffix('.gz'))
+    return result
+if not (root/'system/controlDict').is_file(): die(15, 'INVALID_CASE', 'Missing system/controlDict.')
+solver = value('system/controlDict', 'application')
+np = override or (value('system/decomposeParDict', 'numberOfSubdomains')
+                  if Path('system/decomposeParDict').is_file() else '1')
+if not re.fullmatch('[1-9][0-9]*', np): die(14, 'INVALID_DECOMPOSITION', f'Invalid rank count: {np}')
+np = int(np)
+if override and not Path('system/decomposeParDict').is_file():
+    die(14, 'INVALID_DECOMPOSITION', '--np requires an existing system/decomposeParDict.')
+processors = sorted(p for p in root.iterdir() if re.fullmatch(r'processor\d+|processors(?:\d+(?:_\d+-\d+)?)?', p.name))
+plan.update(solver=solver, ranks=np, decomposition=('none' if mode in ('clean', 'reconstruct') or np == 1 else ('create' if mode == 'new' or not processors else 'reuse')),
+            reconstruction=np > 1 and mode != 'clean', processorCleanup=np > 1 and (mode == 'clean' or keep != 'true'),
+            solverExecution=mode in ('new', 'continue'), cleanup=mode in ('new', 'clean'),
+            log=str(root/'log/log.run'), latestTime=None)
+end = value('system/controlDict', 'endTime')
+try:
+    end = float(end)
+    if not math.isfinite(end): raise ValueError()
+except ValueError: die(12, 'INVALID_RESTART', 'endTime must be finite and numeric.')
+plan['endTime'] = end
+existing = bool(processors or any(n != 0 for n, _ in times(root)))
+plan['requiresConfirmation'] = (mode == 'clean' or mode == 'new' and existing) and allow != 'true'
+if mode in ('continue', 'reconstruct') and processors:
+    if any(p.is_symlink() or not p.is_dir() for p in processors):
+        die(14, 'INVALID_DECOMPOSITION', 'Processor storage contains a symlink or non-directory.')
+    names = {p.name for p in processors}
+    uncollated = {f'processor{i}' for i in range(np)}
+    if np <= 1 or names != uncollated and names != {f'processors{np}'}:
+        die(14, 'INVALID_DECOMPOSITION', 'Processor layout does not match requested ranks. Split/legacy collated layouts require explicit review.')
+if mode == 'continue':
+    start = value('system/controlDict', 'startFrom')
+    if start != 'latestTime': die(12, 'INVALID_RESTART', f'startFrom is {start}; continuation requires latestTime.')
+    storage = processors or [root]
+    latest = []
+    expected = fields(root/'0.orig') | fields(root/'0')
+    for base in storage:
+        ts = times(base)
+        if not ts: die(12, 'INVALID_RESTART', f'No restart time in {base}.')
+        n, name = ts[-1]
+        latest.append(n)
+        destination = base/name
+        if destination.is_symlink(): die(12, 'INVALID_RESTART', f'Restart time is a symlink: {destination}')
+        # Collated wrappers do not identify field classes; validate filenames
+        # against initialized fields, and let OpenFOAM validate their contents.
+        required = expected | fields(base/'0')
+        actual = fields(destination)
+        if base.name.startswith('processors'):
+            actual = {str(f.relative_to(destination)).removesuffix('.gz') for f in destination.rglob('*') if f.is_file() and not f.is_symlink() and f.stat().st_size}
+        if not actual: die(12, 'INVALID_RESTART', f'No readable restart fields in {destination}.')
+        missing = sorted(required - actual)
+        if missing: die(12, 'INVALID_RESTART', f'Missing initialized fields in {destination}: {", ".join(missing)}')
+        if not required: die(12, 'INVALID_RESTART', f'No initial field inventory in 0 or 0.orig for {base}; required restart fields cannot be checked.')
+    if len(set(latest)) != 1: die(12, 'INVALID_RESTART', f'Processor latest times disagree: {latest}')
+    plan['latestTime'] = latest[0]
+    if end <= latest[0]: die(12, 'INVALID_RESTART', f'endTime {end} must exceed restart time {latest[0]}.')
+    if np > 1 and not processors: plan['decomposition'] = 'create from latestTime'
+if mode in ('new', 'continue') and not shutil.which(solver):
+    die(15, 'ENVIRONMENT_MISSING', f'Solver {solver} is unavailable; source the correct OpenFOAM environment.')
+lock = root/'.runCase/lock'
+if lock.exists() and owns_lock != 'true':
+    import fcntl
+    try:
+        with lock.open('r') as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        die(13, 'ALREADY_RUNNING', 'Another runCase owns this case; see .runCase/last-run.json.')
+    except OSError as exc:
+        die(15, 'PREPARATION_FAILED', f'Cannot inspect case lock: {exc}')
+plan['lockStatus'] = 'owned' if owns_lock == 'true' else 'available'
+if lock.exists() and owns_lock != 'true':
+    try:
+        receipt = json.loads((root/'.runCase/last-run.json').read_text())
+        if receipt.get('state') == 'running':
+            plan['warnings'].append('Previous receipt is unfinished, but its kernel lock is free; it will be replaced on launch.')
+    except (OSError, ValueError): pass
+plan['ok'] = True
+if fmt == 'json': print(json.dumps(plan))
+else:
+    for key, val in plan.items(): print(f'{key}: {val}')
+PY
+}
+
+write_receipt() {
+    python3 - "$mode" "${solver:-}" "${nProcs:-1}" "${simStartT:-}" "${1:-running}" "${2:-}" "$errorSymbol" "$$" "${solver_pid:-}" "${invocationArgs[@]}" <<'PY'
+import datetime, json, os, socket, sys, tempfile
+from pathlib import Path
+mode, solver, ranks, restart, state, status, error, pid, child = sys.argv[1:10]
+p = Path('.runCase/last-run.json')
+now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+data = {}
+try:
+    data = json.loads(p.read_text())
+    if data.get('pid') != int(pid): data = {}
+except (OSError, ValueError): pass
+if not data: data['startedAt'] = now
+# Preserve known fields if failure occurred before solver setup.
+data.update(interfaceVersion=1, case=str(Path.cwd()), command=['runCase', *sys.argv[10:]], mode=mode, solver=solver,
+            ranks=int(ranks), restartTime=restart or None, pid=int(pid),
+            solverPid=int(child) if child else None, hostname=socket.gethostname(),
+            state=state, exitStatus=int(status) if status else None,
+            error=error or None, updatedAt=now, log=str(Path('log/log.run').resolve()))
+fd, tmp = tempfile.mkstemp(dir=p.parent, prefix='.receipt-')
+with os.fdopen(fd, 'w') as stream: json.dump(data, stream, indent=2); stream.write('\n')
+os.replace(tmp, p)
+PY
+}
+
+finish_receipt() {
+    local status=$?
+    if [[ "$receiptActive" == true ]]; then
+        if [[ "$status" == 0 ]]; then write_receipt completed "$status";
+        else write_receipt failed "$status"; fi
+    fi
+    if [[ "$status" != 0 && -z "$errorSymbol" ]]; then
+        printf "RUNCASE_ERROR=UNEXPECTED_FAILURE: exited with status %s\n" "$status" >&2
+    fi
+    return "$status"
 }
 
 while [[ "$#" -gt 0 ]]
@@ -571,11 +795,17 @@ do
             echo "  -n,  --new          Starts a new simulation. Cleans the case directory."
             echo "  -c,  --continue     Continues an existing simulation from the latestTime."
             echo "  -r,  --reconstruct  Performs manual reconstruction on a stopped parallel run."
-            echo "  -clean              Cleans the case directory immediately."
+            echo "  -clean, --clean     Cleans the case directory after cleanup approval."
             echo ""
             echo "Options:"
             echo "  -np <number>        Overrides numberOfSubdomains to use <number> processors."
-            echo "  -q,  --quiet        Suppresses interactive terminal output."
+            echo "  -q,  --quiet        Suppresses live display; does not approve prompts."
+            echo "  --non-interactive  Never prompt; fail immediately if approval is needed."
+            echo "  --allow-clean      Explicitly approve cleanup for --new or --clean."
+            echo "  --plan, --dry-run  Validate and print actions without changing the case."
+            echo "  --format=json     Machine-readable output for --plan."
+            echo "  --version         Print version and interface version."
+            echo "  --capabilities    Print supported automation features as JSON."
             echo "  -k,  --keep-processors"
             echo "                      Preserves processor data after successful reconstruction."
             echo "  -a,  --animate      Runs animateCase automatically when finished."
@@ -586,34 +816,46 @@ do
             echo "  -h,  --help         Show this help message and exit."
             exit 0
             ;;
-        -n|--new) mode="new"; originalArgs+=("$1") ;;
-        --force-new) mode="new"; forceNew=true; originalArgs+=("$1") ;;
-        --batch-new-if-empty) mode="new"; batchNewIfEmpty=true ;;
-        -c|--continue) mode="continue"; originalArgs+=("$1") ;;
-        -r|--reconstruct) mode="reconstruct"; originalArgs+=("$1") ;;
-        -clean) mode="clean"; originalArgs+=("$1") ;;
+        --version) echo "runCase $RUNCASE_VERSION (interface $RUNCASE_INTERFACE_VERSION)"; exit 0 ;;
+        --capabilities)
+            printf '%s\n' '{"interfaceVersion":1,"version":"2.0.0","capabilities":["non-interactive","allow-clean","plan","json-plan","restart-validation","case-lock","launch-receipt"],"exitCodes":{"invalidArguments":2,"confirmationRequired":10,"cleanupRequired":11,"invalidRestart":12,"alreadyRunning":13,"invalidDecomposition":14,"preparationFailed":15,"meshFailed":20,"solverFailed":30,"reconstructionFailed":40,"batchFailed":50}}'
+            exit 0 ;;
+        --non-interactive) nonInteractive=true; originalArgs+=("$1") ;;
+        --allow-clean) allowClean=true; originalArgs+=("$1") ;;
+        --plan|--dry-run) planOnly=true ;;
+        --format=*) outputFormat="${1#*=}" ;;
+        -n|--new) set_mode new; originalArgs+=("$1") ;;
+        --force-new) set_mode new; forceNew=true; originalArgs+=("$1") ;;
+        --batch-new-if-empty) set_mode new; batchNewIfEmpty=true ;;
+        -c|--continue) set_mode continue; originalArgs+=("$1") ;;
+        -r|--reconstruct) set_mode reconstruct; originalArgs+=("$1") ;;
+        -clean|--clean) set_mode clean; originalArgs+=("$1") ;;
         -q|--quiet) quiet=true; originalArgs+=("$1") ;;
         -k|--keep-processors) keepProcessors=true; originalArgs+=("$1") ;;
         -a|--animate) animate=true ;;
-        -s|--state) animArgs+=("$1" "$2"); shift ;;
-        --fps) animArgs+=("$1" "$2"); shift ;;
-        --res) animArgs+=("$1" "$2" "$3"); shift 2 ;;
-        --field) animArgs+=("$1" "$2"); shift ;;
-        -np) 
-            if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]
+        -s|--state|--field)
+            [[ $# -ge 2 && "$2" != -* ]] || fail 2 INVALID_ARGUMENTS "$1 requires a value."
+            animArgs+=("$1" "$2"); shift ;;
+        --fps)
+            [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || fail 2 INVALID_ARGUMENTS "--fps requires a positive integer."
+            animArgs+=("$1" "$2"); shift ;;
+        --res)
+            [[ $# -ge 3 && "$2" =~ ^[1-9][0-9]*$ && "$3" =~ ^[1-9][0-9]*$ ]] || fail 2 INVALID_ARGUMENTS "--res requires two positive integers."
+            animArgs+=("$1" "$2" "$3"); shift 2 ;;
+        -b|--batch) isBatch=true ;;
+        -np|--np)
+            if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[1-9][0-9]*$ ]]
             then
-                echo "[ERROR] -np requires a positive integer argument."
-                exit 1
+                fail 2 INVALID_ARGUMENTS "-np requires a positive integer argument."
             fi
             customNP="$2"
             originalArgs+=("$1" "$2")
             shift
             ;;
         -P|--jobs)
-            if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]
+            if [[ "$#" -lt 2 ]] || ! [[ "$2" =~ ^[1-9][0-9]*$ ]]
             then
-                echo "[ERROR] -P requires a positive integer argument."
-                exit 1
+                fail 2 INVALID_ARGUMENTS "-P requires a positive integer argument."
             fi
             batchJobs="$2"
             isBatch=true
@@ -625,29 +867,64 @@ do
                 batchCases+=("$1")
                 isBatch=true
             else
-                echo "[ERROR] Unknown parameter passed: $1"
-                exit 1
+                fail 2 INVALID_ARGUMENTS "Unknown parameter: $1"
             fi
             ;;
     esac
     shift
 done
 
+[[ "$outputFormat" == text || "$outputFormat" == json ]] || fail 2 INVALID_ARGUMENTS "Use --format=text or --format=json."
+[[ "$outputFormat" != json || "$planOnly" == true ]] || fail 2 INVALID_ARGUMENTS "--format=json requires --plan."
+[[ ${#animArgs[@]} -eq 0 || "$animate" == true ]] || fail 2 INVALID_ARGUMENTS "Animation options require --animate."
+[[ -n "$mode" ]] || fail 2 INVALID_ARGUMENTS "Choose --new, --continue, --reconstruct, or --clean."
+[[ "$allowClean" == false || "$mode" == new || "$mode" == clean ]] || fail 2 INVALID_ARGUMENTS "--allow-clean requires --new or --clean."
+# Legacy private flag still counts as explicit cleanup approval.
+[[ "$forceNew" == false ]] || allowClean=true
+# Never draw a live terminal UI into a service journal or pipeline.
+[[ -t 1 ]] || quiet=true
+
 if [[ ${#batchCases[@]} -eq 0 && ! -f "system/controlDict" ]]; then
     isBatch=true
 fi
 
-if [[ -z "$mode" && "$isBatch" == false ]]
-then
-    echo "Usage: runCase [-n|--new] OR [-c|--continue] OR [-r|--reconstruct] OR [-clean] [-np ##]"
-    echo "Use -h or --help for more information."
-    exit 1
+
+if [[ "$isBatch" == false ]]; then
+    if [[ "$planOnly" == true ]]; then
+        preflight
+        exit $?
+    fi
+    # Validate first without changing the case. Lock and validate again before
+    # mutation to prevent concurrent runCase invocations passing the same check.
+    preflight >/dev/null || exit $?
+    if [[ "$mode" == new ]] && case_has_simulation_data .; then
+        [[ "$batchNewIfEmpty" != true ]] || fail 11 CLEANUP_REQUIRED "Unapproved simulation data appeared while this batch case was queued."
+        if [[ "$allowClean" != true ]]; then
+            confirm_action 11 CLEANUP_REQUIRED "Existing result data would be deleted. Re-run with --allow-clean if intended."
+            allowClean=true
+        fi
+    fi
+    if [[ "$mode" == clean && "$allowClean" != true ]]; then
+        confirm_action 11 CLEANUP_REQUIRED "--clean deletes case data. Re-run with --allow-clean if intended."
+        allowClean=true
+    fi
+    command -v flock >/dev/null || fail 15 ENVIRONMENT_MISSING "flock is required for case locking."
+    [[ ! -L .runCase ]] || fail 15 INVALID_CASE ".runCase must not be a symlink."
+    mkdir -p .runCase || fail 15 PREPARATION_FAILED "Cannot create .runCase."
+    [[ ! -L .runCase/lock ]] || fail 15 INVALID_CASE ".runCase/lock must not be a symlink."
+    exec {caseLockFd}>>.runCase/lock || fail 15 PREPARATION_FAILED "Cannot open case lock."
+    flock -n "$caseLockFd" || fail 13 ALREADY_RUNNING "Another runCase owns this case; see .runCase/last-run.json."
+    # The kernel releases flock on process exit. Never unlink its inode.
+    receiptActive=true
+    preflight >/dev/null || exit $?
+    trap finish_receipt EXIT
+    write_receipt running || fail 15 PREPARATION_FAILED "Cannot write launch receipt."
 fi
 
 if [[ "$isBatch" == true ]]; then
-    echo "================================================================================"
-    echo " runCase Batch Manager"
-    echo "================================================================================"
+    if [[ "$planOnly" != true ]]; then
+        echo "runCase Batch Manager"
+    fi
     
     if [[ ${#batchCases[@]} -eq 0 ]]; then
         batchCases=(".")
@@ -659,7 +936,7 @@ if [[ "$isBatch" == true ]]; then
             if [[ -f "$c/system/controlDict" ]]; then
                 validCases+=("$(realpath "$c")")
             else
-                echo "[INFO]  Searching for cases inside '$c'..."
+                echo "[INFO]  Searching for cases inside '$c'..." >&2
                 while IFS= read -r foundCase; do
                     if [[ -n "$foundCase" ]]; then
                         validCases+=("$foundCase")
@@ -667,7 +944,7 @@ if [[ "$isBatch" == true ]]; then
                 done < <(python3 -c "import os,sys; b=os.path.abspath(sys.argv[1]); [d.clear() if r[len(b):].count(os.sep)>=3 else (print(r) or d.clear()) if 'system' in d and os.path.isfile(os.path.join(r,'system','controlDict')) else None for r,d,f in os.walk(b)]" "$c" 2>/dev/null)
             fi
         else
-            echo "[WARN]  Skipping '$c' (not a directory)"
+            echo "[WARN]  Skipping '$c' (not a directory)" >&2
         fi
     done
 
@@ -684,10 +961,19 @@ if [[ "$isBatch" == true ]]; then
     fi
     
     if [[ ${#validCases[@]} -eq 0 ]]; then
-        echo "[ERROR] No valid case directories provided for batch execution."
-        exit 1
+        fail 15 INVALID_CASE "No valid case directories provided for batch execution."
     fi
     
+    if [[ "$nonInteractive" == true && "$animate" == true && ${#validCases[@]} -gt 1 ]]; then
+        fail 10 CONFIRMATION_REQUIRED "animateCase prompts for multi-case rendering; omit --animate and render separately."
+    fi
+    if [[ "$planOnly" == true ]]; then
+        planStatus=0
+        for c in "${validCases[@]}"; do
+            (cd "$c" && preflight) || planStatus=$?
+        done
+        exit "$planStatus"
+    fi
     echo ""
     echo "[INFO]  Mode              : $mode"
     if [[ -n "$customNP" ]]; then
@@ -697,19 +983,6 @@ if [[ "$isBatch" == true ]]; then
     fi
     echo "[INFO]  Batch Jobs (-P)   : $batchJobs"
     echo "[INFO]  Total Cases       : ${#validCases[@]}"
-    
-    if [[ -n "$customNP" ]]; then
-        echo ""
-        echo "[INIT]  Applying -np $customNP to all cases..."
-        for c in "${validCases[@]}"; do
-            dict="$c/system/decomposeParDict"
-            if [[ -f "$dict" ]]; then
-                sed -i -E "s/^([[:space:]]*numberOfSubdomains[[:space:]]+)[0-9]+(;)/\1${customNP}\2/" "$dict"
-            else
-                echo "[WARN]  $dict not found in $(basename "$c")"
-            fi
-        done
-    fi
     
     if [[ "$mode" == "new" ]]; then
         casesWithData=()
@@ -721,16 +994,14 @@ if [[ "$isBatch" == true ]]; then
         
         if [[ ${#casesWithData[@]} -gt 0 ]]; then
             echo ""
-            echo "[WARN]  Existing simulation data detected in the following cases:"
+            echo "[WARN]  Existing simulation data detected in the following cases:" >&2
             for c in "${casesWithData[@]}"; do
                 echo "          - $(basename "$c")"
             done
-            read -r -p "        Delete data and restart these simulations? [y/N]: " reply
-            if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]; then
-                echo "[ABORT] Batch execution cancelled."
-                exit 1
+            if [[ "$allowClean" != true ]]; then
+                confirm_action 11 CLEANUP_REQUIRED "Existing simulation data detected. Delete and restart? Use --allow-clean only if intended."
             fi
-            
+
             # Approval is recorded per case. Cases that were empty retain a
             # fail-closed worker guard in case data appears while they wait.
             for c in "${casesWithData[@]}"; do
@@ -739,16 +1010,18 @@ if [[ "$isBatch" == true ]]; then
         fi
     fi
     
+    if [[ "$mode" == clean && "$allowClean" != true ]]; then
+        confirm_action 11 CLEANUP_REQUIRED "--clean will delete data in all selected cases. Use --allow-clean if intended."
+        originalArgs+=(--allow-clean)
+    fi
     echo ""
     echo "[INFO]  Cases to execute:"
     for c in "${validCases[@]}"; do
         echo "          - $(basename "$c")"
     done
     echo ""
-    read -r -p "Proceed with batch execution? [y/N]: " reply
-    if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]; then
-        echo "[ABORT] Batch execution cancelled."
-        exit 1
+    if [[ "$nonInteractive" != true ]]; then
+        confirm_action 10 CONFIRMATION_REQUIRED "Proceed with batch execution?"
     fi
     echo ""
     
@@ -776,11 +1049,13 @@ if [[ "$isBatch" == true ]]; then
         
         # Disable terminal echo to prevent keyboard input from breaking the UI layout
         # Also hide the cursor for better aesthetics
-        trap 'stty echo 2>/dev/null; tput rmcup 2>/dev/null || echo -en "\033[?1049l"; echo -en "\033[?25h\033[?7h"; echo -e "\n[ABORT] Batch execution interrupted."; kill $(jobs -p) 2>/dev/null; exit 1' INT TERM
+        trap 'interrupt_batch 130' INT
+        trap 'interrupt_batch 143' TERM
         stty -echo 2>/dev/null
         echo -en "\033[?25l\033[?7l"
     else
-        trap 'echo -e "\n[ABORT] Batch execution interrupted."; kill $(jobs -p) 2>/dev/null; exit 1' INT TERM
+        trap 'interrupt_batch 130' INT
+        trap 'interrupt_batch 143' TERM
     fi
     
     while true; do
@@ -821,13 +1096,14 @@ if [[ "$isBatch" == true ]]; then
         
         while [[ $running_jobs -lt $batchJobs ]] && [[ $next_job -lt ${#validCases[@]} ]]; do
             c_dir="${validCases[$next_job]}"
-            workerArgs=("${originalArgs[@]}")
+            workerArgs=("${originalArgs[@]}" --non-interactive)
             if [[ "$mode" == "new" ]]; then
                 for i in "${!workerArgs[@]}"; do
                     if [[ "${workerArgs[$i]}" == "-n" \
                         || "${workerArgs[$i]}" == "--new" ]]; then
                         if [[ "${batchCleanupApproved[$c_dir]:-false}" == true ]]; then
-                            workerArgs[$i]="--force-new"
+                            workerArgs[$i]="--new"
+                            workerArgs+=("--allow-clean")
                         else
                             workerArgs[$i]="--batch-new-if-empty"
                         fi
@@ -837,7 +1113,7 @@ if [[ "$isBatch" == true ]]; then
             if [[ "$quiet" == false ]]; then workerArgs+=("--quiet"); fi
             
             mkdir -p "$c_dir/log"
-            (cd "$c_dir" && "$0" "${workerArgs[@]}" > log/.batch_worker.log 2>&1) &
+            (cd "$c_dir" && "$scriptPath" "${workerArgs[@]}" > log/.batch_worker.log 2>&1) &
             pids[$next_job]=$!
             states[$next_job]=1
             
@@ -969,7 +1245,7 @@ if [[ "$isBatch" == true ]]; then
                 done
             fi
 
-            animateCase -P "$batchJobs" "${animArgs[@]}" "${validCases[@]}"
+            animateCase -P "$batchJobs" "${animArgs[@]}" "${validCases[@]}" || fail 50 BATCH_FAILED "Batch animation failed."
             
             # Rename crashed cases
             for i in "${!validCases[@]}"; do
@@ -987,39 +1263,40 @@ if [[ "$isBatch" == true ]]; then
                             crashedAnimationFile="$animationOutDir/${c_name}_Crashed_${crashedAnimationIndex}.avi"
                         fi
                         if ! mv -n -- "$animationFile" "$crashedAnimationFile"; then
-                            echo "[WARN]  Could not preserve crashed animation '$animationFile'."
+                            echo "[WARN]  Could not preserve crashed animation '$animationFile'." >&2
                         elif [[ -e "$animationFile" || -L "$animationFile" ]]; then
-                            echo "[WARN]  Crash animation destination appeared concurrently; '$animationFile' was preserved."
+                            echo "[WARN]  Crash animation destination appeared concurrently; '$animationFile' was preserved." >&2
                         fi
                     fi
                 fi
             done
         fi
     fi
+    for state in "${states[@]}"; do
+        [[ "$state" != 3 ]] || fail 50 BATCH_FAILED "One or more cases failed; see each case's log/.batch_worker.log."
+    done
     exit 0
 fi
 
-if [[ -z "$mode" ]]
-then
-    echo "Usage: runCase [-n|--new] OR [-c|--continue] OR [-r|--reconstruct] OR [-clean] [-np ##]"
-    echo "Use -h or --help for more information."
-    exit 1
-fi
 
 
 if [[ "$mode" == "clean" ]]
 then
-    mkdir -p log
+    [[ "$allowClean" == true ]] || confirm_action 11 CLEANUP_REQUIRED "--clean deletes case data. Re-run with --allow-clean if intended."
+    mkdir -p log || fail 15 PREPARATION_FAILED "Cannot create log directory."
     echo ""
     printf "[CLEAN] %-40s\n" "Cleaning case directory"
-    find log/ -type f ! -name 'log.checkMesh' -delete
-    foamListTimes -rm
+    find log/ -type f ! -name 'log.checkMesh' -delete || fail 15 PREPARATION_FAILED "Could not clean log files."
+    foamListTimes -rm || fail 15 PREPARATION_FAILED "foamListTimes cleanup failed."
     if ! remove_openfoam_processor_dirs; then
-        echo "[ERROR] Could not remove all recognized OpenFOAM processor directories."
-        exit 1
+        fail 15 PREPARATION_FAILED "Could not remove all recognized OpenFOAM processor directories."
     fi
-    if [[ -d "0.orig" ]]; then rm -rf 0; cp -r 0.orig 0; fi
-    setFields > log/log.setFields 2>&1
+    if [[ -d "0.orig" ]]; then
+            rm -rf -- 0 && cp -r -- 0.orig 0 || fail 15 PREPARATION_FAILED "Could not restore 0.orig."
+        fi
+    if [[ -f system/setFieldsDict ]]; then
+            setFields > log/log.setFields 2>&1 || fail 15 PREPARATION_FAILED "setFields failed; see log/log.setFields."
+        fi
     echo ""
     echo "[DONE]  Cleaning complete."
     exit 0
@@ -1028,11 +1305,10 @@ fi
 # Detect OpenFOAM Environment
 ofVersion="${WM_PROJECT_VERSION:-Unknown}"
 
-solver=$(grep "^[[:space:]]*application" system/controlDict | awk '{print $2}' | sed 's/;//')
+solver=$(foamDictionary system/controlDict -disableFunctionEntries -entry application -value)
 if ! command -v "$solver" &> /dev/null
 then
-    echo "[ERROR] Solver '${solver}' not found in PATH."
-    exit 1
+    fail 15 ENVIRONMENT_MISSING "Solver ${solver} not found in PATH."
 fi
 
 # Update decomposeParDict if customNP is set
@@ -1040,10 +1316,9 @@ if [[ -n "$customNP" ]]
 then
     if [[ -f "system/decomposeParDict" ]]
     then
-        sed -i -E "s/^([[:space:]]*numberOfSubdomains[[:space:]]+)[0-9]+(;)/\1${customNP}\2/" system/decomposeParDict
+        foamDictionary system/decomposeParDict -disableFunctionEntries -entry numberOfSubdomains -set "$customNP" >/dev/null || fail 14 INVALID_DECOMPOSITION "Cannot update rank count."
     else
-        echo "[ERROR] system/decomposeParDict not found, cannot change number of processors."
-        exit 1
+        fail 14 INVALID_DECOMPOSITION "system/decomposeParDict not found; cannot change ranks."
     fi
 fi
 
@@ -1053,7 +1328,7 @@ nProcs=1
 
 if [[ -f "system/decomposeParDict" ]]
 then
-    parsedProcs=$(grep "^[[:space:]]*numberOfSubdomains" system/decomposeParDict | awk '{print $2}' | sed 's/;//')
+    parsedProcs=$(foamDictionary system/decomposeParDict -disableFunctionEntries -entry numberOfSubdomains -value)
     if [[ "$parsedProcs" =~ ^[0-9]+$ ]] && [[ "$parsedProcs" -gt 0 ]]
     then
         nProcs="$parsedProcs"
@@ -1062,8 +1337,7 @@ then
             runParallel=true
         fi
     else
-        echo "[ERROR] Could not read a valid 'numberOfSubdomains' from decomposeParDict."
-        exit 1
+        fail 14 INVALID_DECOMPOSITION "Could not read a valid numberOfSubdomains."
     fi
 fi
 
@@ -1084,32 +1358,44 @@ done < <(
         -name dynamicMeshDict -print0 2>/dev/null
 )
 
-endTime=$(grep "^[[:space:]]*endTime" system/controlDict | awk '{print $2}' | sed 's/;//')
-writeInterval=$(grep "^[[:space:]]*writeInterval" system/controlDict | head -1 | awk '{print $2}' | sed 's/;//')
+endTime=$(foamDictionary system/controlDict -disableFunctionEntries -entry endTime -value)
+writeInterval=$(foamDictionary system/controlDict -disableFunctionEntries -entry writeInterval -value)
 
 # --- Start Time Detection ---
 simStartT="0"
 if [[ "$mode" == "continue" ]] || [[ "$mode" == "reconstruct" ]]
 then
-    simStartT=$( {
-        foamListTimes -latestTime
-        foamListTimes -processor -latestTime
-    } 2>/dev/null | grep -ve '^$' | sort -V | tail -n 1 )
-
-    if [[ -z "$simStartT" ]]; then simStartT="0"; fi
+    collect_openfoam_processor_dirs
+    if [[ ${#collectedProcessorDirs[@]} -gt 0 ]]; then
+        simStartT=$(foamListTimes -processor -latestTime 2>/dev/null)
+    else
+        simStartT=$(foamListTimes -latestTime 2>/dev/null)
+    fi
+    [[ -n "$simStartT" ]] || simStartT=0
 fi
 
 # --- Mesh Status and Cell Count ---
-mkdir -p log
-if [[ "$mode" != "reconstruct" && ! -f log/log.checkMesh ]]
+mkdir -p log || fail 15 PREPARATION_FAILED "Cannot create log directory."
+if [[ "$mode" != "reconstruct" ]]
 then
     printf "[INIT]  %-25s : Checking Mesh" "Mesh Check"
     echo "Checking Mesh" > log/.batch_stage
-    checkMesh -time 0 > log/log.checkMesh 2>&1 &
+    meshCommand=(checkMesh -time 0)
+    if [[ "$mode" == continue ]]; then
+        collect_openfoam_processor_dirs
+        if [[ "$runParallel" == true && ${#collectedProcessorDirs[@]} -gt 0 ]]; then
+            meshCommand=(mpirun -np "$nProcs" checkMesh -parallel -latestTime)
+        else
+            meshCommand=(checkMesh -latestTime)
+        fi
+    fi
+    if [[ -f constant/regionProperties ]]; then meshCommand+=(-allRegions); fi
+    "${meshCommand[@]}" > log/log.checkMesh 2>&1 &
     check_pid=$!
     
     # Trap SIGINT/SIGTERM to kill background checkMesh
-    trap 'kill -TERM "$check_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+    trap 'interrupt_child 130 "$check_pid"' INT
+    trap 'interrupt_child 143 "$check_pid"' TERM
     
     dots="."
     while kill -0 "$check_pid" 2>/dev/null
@@ -1124,7 +1410,7 @@ then
         esac
     done
     
-    wait "$check_pid"
+    wait "$check_pid" || fail 20 MESH_FAILED "checkMesh failed; see log/log.checkMesh."
     
     # Restore traps
     trap - SIGINT SIGTERM
@@ -1135,12 +1421,16 @@ then
     else
         meshStatus="Failed"
     fi
-    echo -en "\r\033[2K"
+    if [[ "$quiet" == false ]]; then echo -en "\r\033[2K"; else echo; fi
 elif [[ -f log/log.checkMesh ]]
 then
     meshStatus=$(grep -iq "Mesh OK" log/log.checkMesh && echo "OK" || echo "Failed")
 else
     meshStatus="N/A"
+fi
+
+if [[ "$mode" != reconstruct && "$meshStatus" != OK ]]; then
+    fail 20 MESH_FAILED "Mesh check failed; see log/log.checkMesh."
 fi
 
 if [[ -f log/log.checkMesh ]]; then
@@ -1193,11 +1483,7 @@ print_case_info() {
     fi
     echo ""
     printf "[INFO]  %-25s : %s s\n" "Starting from" "$simStartT"
-    if [[ "$mode" == "continue" ]]; then
-        if grep -q "^[[:space:]]*startFrom[[:space:]]\+startTime;" system/controlDict; then
-            echo -e "\033[0;33m[WARNING] runCase -c (continue) was called, but system/controlDict has 'startFrom startTime;'. The solver will restart from startTime!\033[0m"
-        fi
-    fi
+
 }
 
 print_case_info
@@ -1232,31 +1518,27 @@ else
     then
         if [[ "$hasData" -eq 1 ]] && [[ "$batchNewIfEmpty" == true ]]
         then
-            echo "[ERROR] Unapproved simulation data appeared while this batch case was queued."
-            echo "        No data was removed; rerun the batch command to review it."
-            exit 1
-        elif [[ "$hasData" -eq 1 ]] && [[ "$forceNew" == false ]]
+            fail 11 CLEANUP_REQUIRED "Unapproved simulation data appeared while this batch case was queued. No data was removed; review and retry."
+        elif [[ "$hasData" -eq 1 ]] && [[ "$allowClean" == false ]]
         then
             echo ""
-            printf "[WARN]  %-25s\n" "Existing simulation data detected."
-            read -r -p "        Delete and restart simulation? [y/N]: " reply
-            if [[ ! "$reply" =~ ^[yY][eE]?[sS]?$ ]]
-            then
-                echo "[ABORT] Simulation cancelled."
-                exit 1
-            fi
+            printf "[WARN]  %-25s\n" "Existing simulation data detected." >&2
+            confirm_action 11 CLEANUP_REQUIRED "Existing result data would be deleted by --new. Re-run with --allow-clean if intended."
         fi
         
         echo ""
         printf "[CLEAN] %-40s\n" "Cleaning case directory"
-        find log/ -type f ! -name 'log.checkMesh' -delete
-        foamListTimes -rm
+        find log/ -type f ! -name 'log.checkMesh' -delete || fail 15 PREPARATION_FAILED "Could not clean log files."
+        foamListTimes -rm || fail 15 PREPARATION_FAILED "foamListTimes cleanup failed."
         if ! remove_openfoam_processor_dirs; then
-            echo "[ERROR] Could not remove all recognized OpenFOAM processor directories."
-            exit 1
+            fail 15 PREPARATION_FAILED "Could not remove all recognized OpenFOAM processor directories."
         fi
-        if [[ -d "0.orig" ]]; then rm -rf 0; cp -r 0.orig 0; fi
-        setFields > log/log.setFields 2>&1
+        if [[ -d "0.orig" ]]; then
+            rm -rf -- 0 && cp -r -- 0.orig 0 || fail 15 PREPARATION_FAILED "Could not restore 0.orig."
+        fi
+        if [[ -f system/setFieldsDict ]]; then
+            setFields > log/log.setFields 2>&1 || fail 15 PREPARATION_FAILED "setFields failed; see log/log.setFields."
+        fi
         echo ""
     fi
 
@@ -1271,11 +1553,14 @@ else
         then
             printf "[RUN]   Decomposing domain"
             echo "Decomposing" > log/.batch_stage
-            decomposePar > log/log.decomposePar 2>&1 &
+            decomposeArgs=()
+            [[ "$mode" != continue ]] || decomposeArgs+=(-latestTime)
+            decomposePar "${decomposeArgs[@]}" > log/log.decomposePar 2>&1 &
             decomp_pid=$!
             
             # Trap SIGINT/SIGTERM to kill background decomposePar
-            trap 'kill -TERM "$decomp_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+            trap 'interrupt_child 130 "$decomp_pid"' INT
+            trap 'interrupt_child 143 "$decomp_pid"' TERM
             
             dots="."
             while kill -0 "$decomp_pid" 2>/dev/null
@@ -1290,12 +1575,13 @@ else
                 esac
             done
             
-            wait "$decomp_pid"
+            wait "$decomp_pid" || fail 14 INVALID_DECOMPOSITION "decomposePar failed; see log/log.decomposePar."
             
             # Restore traps
             trap - SIGINT SIGTERM
             
-            printf "\r\033[2K[RUN]   Decomposing domain... Done\n"
+            if [[ "$quiet" == false ]]; then printf "\r\033[2K"; fi
+            printf "[RUN]   Decomposing domain... Done\n"
         fi
 
         printf "[RUN]   Starting %s in parallel (%s cores)\n" "$solver" "$nProcs"
@@ -1309,8 +1595,11 @@ else
         solver_pid=$!
     fi
 
+    write_receipt running || fail 15 PREPARATION_FAILED "Cannot update launch receipt."
+
     # Intercept Ctrl+C and kill the background solver process
-    trap 'echo -e "\n[ABORT] User interrupt. Terminating solver..."; kill -TERM "$solver_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+    trap 'interrupt_child 130 "$solver_pid"' INT
+    trap 'interrupt_child 143 "$solver_pid"' TERM
     trap 'redraw_ui=true' SIGWINCH
 
     redraw_ui=false
@@ -1507,15 +1796,16 @@ else
 
     wait "$solver_pid"
     exit_status=$?
+    trap - INT TERM WINCH
 
     if [ $exit_status -ne 0 ]
     then
         echo ""
-        printf "[ERROR] Solver terminated unexpectedly (Exit code: %s)\n" "$exit_status"
+        printf "[ERROR] Solver terminated unexpectedly (Exit code: %s)\n" "$exit_status" >&2
         echo "------------------- LAST LOG ENTRIES -------------------"
-        tail -n 25 log/log.run
+        tail -n 25 log/log.run >&2
         echo "--------------------------------------------------------"
-        exit $exit_status
+        fail 30 SOLVER_FAILED "Solver exited with status $exit_status; see log/log.run."
     fi
     echo ""
 fi
@@ -1542,13 +1832,13 @@ then
         if ! openfoam_command_supports_option reconstructPar -allRegions; then
             reconstructSuccess=false
             echo ""
-            printf "[ERROR] This OpenFOAM version cannot reconstruct all regions safely.\n"
+            printf "[ERROR] This OpenFOAM version cannot reconstruct all regions safely.\n" >&2
             printf "        Processor directories were preserved.\n"
         elif [[ "$isDynamicMesh" == true ]] \
             && ! openfoam_command_supports_option reconstructParMesh -allRegions; then
             reconstructSuccess=false
             echo ""
-            printf "[ERROR] This OpenFOAM version cannot reconstruct all dynamic region meshes safely.\n"
+            printf "[ERROR] This OpenFOAM version cannot reconstruct all dynamic region meshes safely.\n" >&2
             printf "        Processor directories were preserved.\n"
         else
             reconstructAllRegions=true
@@ -1586,7 +1876,7 @@ then
             then
                 reconstructSuccess=false
                 echo ""
-                printf "[ERROR] reconstructParMesh failed. Processor directories preserved.\n"
+                printf "[ERROR] reconstructParMesh failed. Processor directories preserved.\n" >&2
                 printf "        Please check log/log.reconstructParMesh for details.\n"
             fi
         fi
@@ -1598,14 +1888,10 @@ then
         echo "Reconstructing" > log/.batch_stage
 
         reconstructionVerificationPrepared=false
-        if [[ "$keepProcessors" == false ]]; then
-            if prepare_reconstruction_verification "$fileHandlerArg"; then
-                reconstructionVerificationPrepared=true
-            else
-                printf "[WARN]  Reconstruction verification could not be prepared.\n"
-                printf "        %s. Processor directories will be preserved.\n" \
-                    "$reconstructionVerificationError"
-            fi
+        if prepare_reconstruction_verification "$fileHandlerArg"; then
+            reconstructionVerificationPrepared=true
+        else
+            fail 40 RECONSTRUCTION_FAILED "Cannot prepare reconstruction verification: $reconstructionVerificationError. Processor directories preserved."
         fi
         
         # Get all reconstructed times
@@ -1618,7 +1904,8 @@ then
         reconstruct_pid=$!
         
         # Trap SIGINT and SIGTERM to kill reconstructPar if interrupted
-        trap 'echo -e "\n[ABORT] User interrupt. Terminating reconstructPar..."; kill -TERM "$reconstruct_pid" 2>/dev/null; exit 1' SIGINT SIGTERM
+        trap 'interrupt_child 130 "$reconstruct_pid"' INT
+        trap 'interrupt_child 143 "$reconstruct_pid"' TERM
         
         echo -e "\n"
         
@@ -1674,30 +1961,33 @@ then
             # Clear progress bar and Reconstructing Timestep lines
             if [[ "$quiet" == false ]]; then echo -en "\033[2A\033[2K\033[1B\033[2K\033[1A"; fi
 
-            if [[ "$keepProcessors" == true ]]; then
-                printf "[KEEP]  %-40s\n" "Processor directories preserved (--keep-processors)"
-            elif [[ "$reconstructionVerificationPrepared" != true ]]; then
-                printf "[KEEP]  %-40s\n" "Processor directories preserved (verification unavailable)"
+            if [[ "$reconstructionVerificationPrepared" != true ]]; then
+                fail 40 RECONSTRUCTION_FAILED "Verification unavailable: $reconstructionVerificationError. Processor directories preserved."
             else
                 printf "[VERIFY] %-40s\n" "Checking reconstructed data"
                 if verify_reconstructed_data "$fileHandlerArg" "$reconstructAllRegions"; then
                     printf "[VERIFY] %-40s\n" "Reconstructed data verified"
-                    printf "[CLEAN] %-40s\n" "Removing verified processor directories"
-                    remove_verified_processor_dirs
+                    if [[ "$keepProcessors" == true ]]; then
+                        printf "[KEEP]  %-40s\n" "Processor directories preserved (--keep-processors)"
+                    else
+                        printf "[CLEAN] %-40s\n" "Removing verified processor directories"
+                        remove_verified_processor_dirs || fail 40 RECONSTRUCTION_FAILED "Verified processor cleanup failed; inspect retained data."
+                    fi
                 else
-                    printf "[WARN]  Reconstruction verification failed.\n"
+                    printf "[WARN]  Reconstruction verification failed.\n" >&2
                     printf "        %s. Processor directories were preserved.\n" \
                         "$reconstructionVerificationError"
+                    fail 40 RECONSTRUCTION_FAILED "Reconstruction verification failed: $reconstructionVerificationError. Processor directories preserved."
                 fi
             fi
         else
             echo ""
-            printf "[ERROR] reconstructPar failed. Processor directories preserved.\n"
+            printf "[ERROR] reconstructPar failed. Processor directories preserved.\n" >&2
             printf "        Please check log/log.reconstructPar for details.\n"
-            exit 1
+            fail 40 RECONSTRUCTION_FAILED "reconstructPar failed; see log/log.reconstructPar. Processor data preserved."
         fi
     else
-        exit 1
+        fail 40 RECONSTRUCTION_FAILED "Mesh/region reconstruction failed. Processor data preserved."
     fi
 fi
 
@@ -1707,13 +1997,15 @@ if [[ "$animate" == true && "$isBatch" == false ]]; then
     echo ""
     if [[ "$quiet" == false ]]; then
         printf "[RUN]   %-40s\n" "Rendering animation"
-        animateCase "${animArgs[@]}"
+        animateCase "${animArgs[@]}" || fail 15 PREPARATION_FAILED "Animation failed."
     else
-        animateCase "${animArgs[@]}" > log/log.animateCase 2>&1
+        animateCase "${animArgs[@]}" > log/log.animateCase 2>&1 || fail 15 PREPARATION_FAILED "Animation failed; see log/log.animateCase."
     fi
 fi
 
 # Horizontal Divider
-cols=$(tput cols)
+cols=$(tput cols 2>/dev/null || echo 80)
 if [[ "$cols" -gt 100 ]]; then cols=100; fi
 printf '%*s\n' "$cols" '' | tr ' ' '='
+
+exit 0
