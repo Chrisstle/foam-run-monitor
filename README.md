@@ -65,6 +65,11 @@ source ~/.bashrc
 
 `runCase` coordinates the normal OpenFOAM case lifecycle: optional cleanup, mesh checking, decomposition, solver execution, progress reporting, reconstruction, and optional animation rendering.
 
+Prepare the mesh and case inputs before launching. `runCase` does not execute
+`Allrun`, `Allmesh`, or custom initialization scripts. Use the case-specific
+workflow when those steps are required; do not replace a custom `Allrun` with
+`runCase --new` without accounting for them.
+
 Run it inside a case directory containing `system/controlDict`, or give it one or more case or parent directories to use batch mode.
 
 ```bash
@@ -116,7 +121,7 @@ New and clean modes retain `log/log.checkMesh` while removing other files under 
 | `--non-interactive` | Never prompts; missing cleanup approval fails immediately. Ordinary batch execution proceeds without a final question. |
 | `--allow-clean` | Explicitly approves destructive cleanup in `--new` or `--clean` mode only. |
 | `--plan`, `--dry-run` | Validates and prints intended actions without changing files, running mesh checks, or starting solvers. |
-| `--format=json` | Emits a JSON plan, or one JSON object per line for batch plans. Requires `--plan`. |
+| `--format=text`, `--format=json` | Selects text (default) or JSON plan output. Batch JSON is one object per line. JSON requires `--plan`. |
 | `--version`, `--capabilities` | Reports script/interface versions or JSON automation capabilities and exit codes. |
 | `-h`, `--help` | Shows command-line help. |
 
@@ -143,7 +148,9 @@ explicit cleanup approval; it does not grant that approval. Batch JSON plans
 are JSON Lines (one object per discovered case). Errors go to stderr as
 `RUNCASE_ERROR=NAME: explanation`; case-validation failures in JSON plan mode
 also produce a JSON error object. Plans never apply `--np` or acquire a durable
-lock, and do not perform mesh or solver checks.
+lock. They check that the solver executable is available for new/continued runs,
+but do not execute it or check the mesh. Execution revalidates the case while
+holding its lock; a successful plan is not a reservation.
 
 Dictionary queries disable OpenFOAM function entries to keep planning free of
 side effects. Values supplied only through `#include`, `#calc`, `#codeStream`,
@@ -188,6 +195,24 @@ non-interactive mode; render separately. `--jobs` counts cases, not cores:
 choose concurrency from each case's rank count. For a 14-core budget, two
 8-rank jobs must run sequentially. The script remains a foreground command;
 a service manager can own it for persistent unattended execution.
+
+### Persistent unattended execution
+
+Source OpenFOAM inside the service process; a service may not load your normal
+interactive shell setup. For example, with OpenFOAM v2512 and a prepared case:
+
+```bash
+systemd-run --user --unit=foam-case1 \
+  --property=WorkingDirectory=/absolute/path/to/case1 \
+  /bin/bash -lc 'source /usr/lib/openfoam/openfoam2512/etc/bashrc && exec /absolute/path/to/runCase --continue --non-interactive --quiet'
+```
+
+Use a unique unit name and substitute your installation and case paths. The
+wrapper output goes to the service journal; solver output remains in
+`log/log.run`. Check initial service ownership with
+`systemctl --user is-active foam-case1`. Service startup does not prove solver
+completion. In managed execution environments, `nohup` alone may not survive
+session cleanup; the service manager provides independent process ownership.
 
 ### Single-case execution
 
