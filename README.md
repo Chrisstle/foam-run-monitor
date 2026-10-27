@@ -391,7 +391,9 @@ A process is recognized when its working directory contains `system/controlDict`
 
 The monitor first looks through process file descriptors for an active log. If that does not find one, it searches recently modified files inside the case and checks for standard OpenFOAM time output. This supports many log names and redirection arrangements, but readable processes and recognizable OpenFOAM log lines are still required.
 
-ETA, iteration speed, Courant numbers, capillary number, and dynamic cell counts are estimates or parsed values based on recent log output. A value may temporarily appear as `N/A`, `Unknown`, or `Calculating...` until enough data is available.
+Dictionary settings are read as literal top-level entries, including multiple entries on one line. Comments and nested dictionaries are ignored; includes, variable substitutions, and executable directives are not expanded. Mesh details come from the newest readable `log/log.checkMesh` or case-root `log.checkMesh`.
+
+ETA, iteration speed, Courant numbers, capillary number, and dynamic cell counts are estimates or parsed values based on recent log output. A value may temporarily appear as `N/A` or `Unknown` until enough data is available. ETA displays `Unavailable` unless both the target end time and a positive measured simulation speed are available.
 
 ## animateCase
 
